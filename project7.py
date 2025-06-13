@@ -10,27 +10,10 @@ import threading
 import RPi.GPIO as GPIO
 from gpiozero import DistanceSensor, Servo
 from time import time
-import pytesseract
 import re
 import logging
 import os
-import subprocess
-
-# Tesseract 경로 강제 설정 (가장 중요)
-pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
-print("Tesseract 경로 강제 설정 완료")
-
-# 실제 tesseract 경로 자동 찾기 및 설정
-try:
-    result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
-    if result.returncode == 0:
-        tesseract_path = result.stdout.strip()
-        pytesseract.pytesseract.tesseract_cmd = tesseract_path
-        print(f"Tesseract 경로 자동 설정: {tesseract_path}")
-    else:
-        print("Tesseract 경로를 찾을 수 없습니다")
-except Exception as e:
-    print(f"경로 설정 오류: {e}")
+from paddleocr import PaddleOCR
 
 # 시스템 인코딩을 UTF-8로 설정
 if sys.stdout.encoding != 'utf-8':
@@ -80,12 +63,10 @@ mqtt_client = mqtt.Client()
 def safe_mqtt_publish(topic, message):
     try:
         if isinstance(message, str):
-            # 한국어가 포함된 경우 UTF-8로 인코딩하여 전송
             mqtt_client.publish(topic, message.encode('utf-8'))
         else:
             mqtt_client.publish(topic, message)
     except UnicodeEncodeError:
-        # 인코딩 실패 시 영문으로 대체
         mqtt_client.publish(topic, "Korean text detected")
         logger.warning(f"MQTT 메시지 인코딩 실패: {topic}")
 
@@ -118,23 +99,12 @@ stride, names = model.stride, model.names
 logger.info(f"YOLOv5 모델 로드 완료. 클래스: {names}")
 print(f"YOLOv5 모델 로드 완료. 감지 클래스: {names}")
 
-# Tesseract 설치 확인
-try:
-    tesseract_version = pytesseract.get_tesseract_version()
-    logger.info(f"Tesseract 버전: {tesseract_version}")
-    print(f"Tesseract OCR 버전: {tesseract_version}")
-    
-    # Tesseract 5.x 언어 확인
-    langs = pytesseract.get_languages()
-    print(f"사용 가능한 언어: {langs}")
-    if 'kor' in langs:
-        print("한국어 지원: OK")
-    else:
-        print("한국어 지원: 없음")
-        
-except Exception as e:
-    logger.error(f"Tesseract 오류: {e}")
-    print(f"Tesseract 오류: {e}")
+# PaddleOCR 초기화
+logger.info("PaddleOCR 초기화 시작...")
+print("PaddleOCR 초기화 중...")
+ocr = PaddleOCR(use_angle_cls=True, lang='korean')
+logger.info("PaddleOCR 초기화 완료")
+print("PaddleOCR 초기화 완료")
 
 # Picamera2 initialization
 try:
@@ -162,141 +132,72 @@ parking_status = "empty"
 latest_ocr_text = ""
 ocr_debug_info = ""
 
-def preprocess_license_plate(image):
-    """Tesseract 5.x 최적화 전처리"""
-    try:
-        logger.debug("번호판 이미지 전처리 시작")
-        print("이미지 전처리 시작...")
-        
-        # 그레이스케일 변환
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Tesseract 5.x는 더 큰 이미지를 선호
-        height, width = gray.shape
-        if height < 80:
-            scale = 80 / height
-            new_width = int(width * scale)
-            gray = cv2.resize(gray, (new_width, 80), interpolation=cv2.INTER_CUBIC)
-            print(f"이미지 크기 조정: {new_width}x80")
-        
-        # 노이즈 제거
-        denoised = cv2.medianBlur(gray, 3)
-        
-        # 대비 향상
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(denoised)
-        
-        # 이진화 (OTSU 방법이 5.x에서 더 효과적)
-        _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # 모폴로지 연산
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        processed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        
-        logger.debug("번호판 이미지 전처리 완료")
-        print("이미지 전처리 완료")
-        return processed
-        
-    except Exception as e:
-        logger.error(f"이미지 전처리 오류: {e}")
-        print(f"이미지 전처리 오류: {e}")
-        return image
-
 def extract_text_from_license_plate(license_plate_image):
-    """Tesseract 5.x 최적화 텍스트 추출 - 강제 실행 포함"""
+    """PaddleOCR을 사용한 번호판 텍스트 추출"""
     global ocr_debug_info
     
     try:
-        print("=== OCR 텍스트 추출 강제 시작 ===")
-        logger.info("OCR 텍스트 추출 시작")
+        logger.info("PaddleOCR 텍스트 추출 시작")
+        print("PaddleOCR 텍스트 추출 시작...")
         
-        # 이미지 크기 확인
-        height, width = license_plate_image.shape[:2]
-        print(f"번호판 이미지 크기: {width}x{height}")
+        # PaddleOCR 실행
+        result = ocr.ocr(license_plate_image)
         
-        # 전처리 적용
-        processed_image = preprocess_license_plate(license_plate_image)
-        
-        # 디버깅용 이미지 저장
-        timestamp = int(time())
-        cv2.imwrite(f'/tmp/license_original_{timestamp}.jpg', license_plate_image)
-        cv2.imwrite(f'/tmp/license_processed_{timestamp}.jpg', processed_image)
-        print(f"디버깅 이미지 저장: /tmp/license_*_{timestamp}.jpg")
-        
-        # Tesseract 5.x 최적화 설정들 (영어 우선으로 시도)
-        configs = [
-            ('--oem 1 --psm 8', 'eng'),     # 영어만으로 먼저 시도
-            ('--oem 1 --psm 7', 'eng'),
-            ('--oem 1 --psm 6', 'eng'),
-            ('--oem 1 --psm 11', 'eng'),    # 라즈베리파이에서 효과적
-            ('--oem 1 --psm 8', 'kor+eng'), # 한국어+영어
-            ('--oem 1 --psm 7', 'kor+eng'),
-            ('--oem 3 --psm 8', 'eng'),     # 기본 엔진
-        ]
-        
-        for config, lang in configs:
-            try:
-                print(f"시도 중: {config} (언어: {lang})")
-                
-                text = pytesseract.image_to_string(processed_image, config=config, lang=lang)
-                text_clean = text.strip().replace(' ', '').replace('\n', '').replace('\t', '')
-                
-                print(f"OCR 원본 결과: '{text}'")
-                print(f"OCR 정리 결과: '{text_clean}'")
-                
-                if len(text_clean) >= 3:
-                    # 한국 번호판 패턴 검증
-                    korean_plate_patterns = [
-                        r'^[0-9]{2,3}[가-힣][0-9]{4}$',
-                        r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',
-                        r'^[0-9]{2}[가-힣][0-9]{4}$'
-                    ]
+        if result and result[0]:
+            for line in result[0]:
+                if len(line) >= 2:
+                    text = line[1][0]  # 텍스트
+                    confidence = line[1][1]  # 신뢰도
                     
-                    for pattern in korean_plate_patterns:
-                        if re.match(pattern, text_clean):
-                            print(f"번호판 패턴 매칭 성공: {text_clean}")
-                            ocr_debug_info = f"성공: {config} → {text_clean}"
-                            return text_clean
+                    print(f"PaddleOCR 결과: '{text}', 신뢰도: {confidence:.2f}")
                     
-                    # 부분 매칭 (숫자+한글 포함)
-                    if re.search(r'[0-9]', text_clean) and re.search(r'[가-힣]', text_clean):
-                        print(f"부분 매칭 성공: {text_clean}")
-                        ocr_debug_info = f"부분매칭: {config} → {text_clean}"
-                        return text_clean
-                    
-                    # 영문+숫자 조합 (4글자 이상)
-                    if len(text_clean) >= 4 and re.match(r'^[A-Z0-9]+$', text_clean):
-                        print(f"영문 번호판 인식: {text_clean}")
-                        ocr_debug_info = f"영문: {config} → {text_clean}"
-                        return text_clean
-                
-            except Exception as e:
-                print(f"OCR 오류 ({config}): {e}")
-                continue
+                    if confidence > 0.5:  # 신뢰도 50% 이상
+                        # 텍스트 정리
+                        clean_text = text.replace(' ', '').replace('\n', '').replace('\t', '')
+                        
+                        # 한국 번호판 패턴 검증
+                        korean_plate_patterns = [
+                            r'^[0-9]{2,3}[가-힣][0-9]{4}$',  # 일반: 12가3456, 123가4567
+                            r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',  # 신형: 서울12가3456
+                            r'^[0-9]{2}[가-힣][0-9]{4}$'   # 2자리: 12가3456
+                        ]
+                        
+                        for pattern in korean_plate_patterns:
+                            if re.match(pattern, clean_text):
+                                print(f"번호판 패턴 매칭 성공: {clean_text}")
+                                ocr_debug_info = f"성공: {clean_text} (신뢰도: {confidence:.2f})"
+                                return clean_text
+                        
+                        # 부분 매칭 (숫자+한글 포함)
+                        if len(clean_text) >= 4 and re.search(r'[0-9]', clean_text) and re.search(r'[가-힣]', clean_text):
+                            print(f"부분 매칭 성공: {clean_text}")
+                            ocr_debug_info = f"부분매칭: {clean_text} (신뢰도: {confidence:.2f})"
+                            return clean_text
+                        
+                        # 영문+숫자 조합
+                        if len(clean_text) >= 4 and re.match(r'^[A-Z0-9]+$', clean_text):
+                            print(f"영문 번호판: {clean_text}")
+                            ocr_debug_info = f"영문: {clean_text} (신뢰도: {confidence:.2f})"
+                            return clean_text
         
-        print("모든 OCR 시도 실패")
-        ocr_debug_info = "모든 시도 실패"
+        print("PaddleOCR 인식 실패")
+        ocr_debug_info = "인식된 텍스트 없음"
         return None
         
     except Exception as e:
-        logger.error(f"OCR 전체 오류: {e}")
-        print(f"OCR 전체 오류: {e}")
-        ocr_debug_info = f"OCR 오류: {e}"
+        logger.error(f"PaddleOCR 오류: {e}")
+        print(f"PaddleOCR 오류: {e}")
+        ocr_debug_info = f"PaddleOCR 오류: {e}"
         return None
 
 def control_servo_motor(angle):
     """Control servo motor angle (0-180 degrees)"""
     global servo_position
     try:
-        # Convert angle to servo value (-1 to 1)
         servo_value = (angle - 90) / 90.0
         servo_motor.value = max(-1, min(1, servo_value))
         servo_position = angle
         
-        # Send MQTT message (안전한 전송)
         safe_mqtt_publish(TOPIC_SERVO, f"Servo angle: {angle}")
         logger.info(f"서보 모터 {angle}도로 이동")
         print(f"서보 모터: {angle}도")
@@ -313,11 +214,9 @@ def read_ultrasonic_sensor():
     
     while True:
         try:
-            # Read distance in centimeters
             distance_cm = ultrasonic_sensor.distance * 100
             current_distance = distance_cm
             
-            # Determine parking status based on distance
             if distance_cm < 20:  # Object within 20cm
                 new_status = "occupied"
                 if parking_status != new_status:
@@ -334,11 +233,8 @@ def read_ultrasonic_sensor():
                     print("차량 이탈")
             
             parking_status = new_status
-            
-            # Send distance data via MQTT (안전한 전송)
             safe_mqtt_publish(TOPIC_SENSOR, f"Distance: {distance_cm:.2f}cm")
-            
-            sleep(0.5)  # Read every 0.5 seconds
+            sleep(0.5)
             
         except Exception as e:
             logger.error(f"초음파 센서 오류: {e}")
@@ -346,17 +242,11 @@ def read_ultrasonic_sensor():
             sleep(1)
 
 def detect_objects(frame):
-    """YOLOv5 object detection function with OCR - 강제 OCR 테스트 포함"""
+    """YOLOv5 object detection function with PaddleOCR"""
     global latest_ocr_text
     
     try:
         logger.debug("객체 감지 시작")
-        
-        # 강제 OCR 테스트 (디버깅용)
-        print("=== 강제 OCR 테스트 시작 ===")
-        test_img = frame[100:200, 100:400]  # 임의 영역 잘라내기
-        force_ocr_text = extract_text_from_license_plate(test_img)
-        print(f"강제 OCR 결과: {force_ocr_text}")
         
         img = cv2.resize(frame, (320, 320))
         img_input = img[:, :, ::-1].transpose(2, 0, 1)
@@ -391,10 +281,10 @@ def detect_objects(frame):
                 logger.info(f"객체 감지: {names[int(cls)]} (신뢰도: {conf:.2f})")
                 print(f"감지: {names[int(cls)]} (신뢰도: {conf:.2f})")
                 
-                # 번호판 감지 시 OCR 수행
+                # 번호판 감지 시 PaddleOCR 수행
                 if 'license' in names[int(cls)].lower() or 'plate' in names[int(cls)].lower():
-                    logger.info("번호판 감지됨 - OCR 시작")
-                    print("번호판 감지됨! OCR 시작...")
+                    logger.info("번호판 감지됨 - PaddleOCR 시작")
+                    print("번호판 감지됨! PaddleOCR 시작...")
                     
                     # 번호판 영역 잘라내기
                     x1, y1, x2, y2 = xyxy
@@ -409,7 +299,11 @@ def detect_objects(frame):
                     if x2 > x1 and y2 > y1:  # 유효한 영역인지 확인
                         license_plate_crop = frame[y1:y2, x1:x2]
                         
-                        # OCR 텍스트 추출
+                        # 디버깅용 이미지 저장
+                        timestamp = int(time())
+                        cv2.imwrite(f'/tmp/license_paddle_{timestamp}.jpg', license_plate_crop)
+                        
+                        # PaddleOCR 텍스트 추출
                         ocr_text = extract_text_from_license_plate(license_plate_crop)
                         
                         if ocr_text:
@@ -417,15 +311,15 @@ def detect_objects(frame):
                             label = f'{names[int(cls)]} {conf:.2f} [{ocr_text}]'
                             license_plates_detected.append(f"{names[int(cls)]} - OCR: {ocr_text}")
                             
-                            # MQTT로 OCR 결과 전송 (안전한 전송)
+                            # MQTT로 OCR 결과 전송
                             safe_mqtt_publish(TOPIC_OCR, f"License Plate: {ocr_text}")
-                            logger.info(f"OCR 성공: {ocr_text}")
-                            print(f"OCR 성공: {ocr_text}")
+                            logger.info(f"PaddleOCR 성공: {ocr_text}")
+                            print(f"PaddleOCR 성공: {ocr_text}")
                             
                         else:
                             license_plates_detected.append(label)
-                            logger.warning("OCR 실패")
-                            print("OCR 실패")
+                            logger.warning("PaddleOCR 실패")
+                            print("PaddleOCR 실패")
                 
                 detections.append({
                     'bbox': xyxy,
@@ -434,7 +328,7 @@ def detect_objects(frame):
                     'confidence': float(conf)
                 })
         
-        # Send MQTT message if license plate detected (안전한 전송)
+        # Send MQTT message if license plate detected
         if license_plates_detected:
             try:
                 safe_mqtt_publish(TOPIC_STATUS, "license_plate_detected")
@@ -463,7 +357,6 @@ def generate_frames():
     
     if not camera_available:
         logger.warning("카메라 없이 더미 프레임 생성")
-        # 카메라가 없을 때 더미 프레임 생성
         while True:
             dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(dummy_frame, "Camera Not Available", (150, 240), 
@@ -480,13 +373,9 @@ def generate_frames():
     
     while True:
         try:
-            # Capture frame
             frame = picam2.capture_array()
-            
-            # Detect objects
             detections = detect_objects(frame)
             
-            # Update global detections
             with detection_lock:
                 latest_detections = detections
             
@@ -512,7 +401,6 @@ def generate_frames():
                 cv2.putText(frame, f"OCR: {latest_ocr_text}", (10, 120), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
-            # Encode frame
             ret, buffer = cv2.imencode('.jpg', frame)
             if not ret:
                 continue
@@ -533,7 +421,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Smart Parking System with OCR</title>
+        <title>Smart Parking System with PaddleOCR</title>
         <style>
             body { font-family: Arial, sans-serif; text-align: center; background-color: #f5f5f5; }
             .container { max-width: 1000px; margin: 0 auto; padding: 20px; background-color: white; border-radius: 10px; }
@@ -548,14 +436,14 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>스마트 주차 관리 시스템 (OCR 지원)</h1>
+            <h1>스마트 주차 관리 시스템 (PaddleOCR 지원)</h1>
             
             <div class="video-container">
                 <img src="{{ url_for('video_feed') }}" width="640" height="480" alt="Camera Feed">
             </div>
             
             <div class="ocr-result">
-                <h4>최근 OCR 결과</h4>
+                <h4>최근 PaddleOCR 결과</h4>
                 <p id="ocr-text">대기 중...</p>
             </div>
             
@@ -567,7 +455,7 @@ def index():
             <div class="status-grid">
                 <div class="status-box">
                     <h4>카메라 상태</h4>
-                    <p>실시간 번호판 감지 + OCR</p>
+                    <p>실시간 번호판 감지 + PaddleOCR</p>
                 </div>
                 <div class="status-box">
                     <h4>거리 센서</h4>
@@ -605,7 +493,6 @@ def index():
                     });
             }
             
-            // Update status every 2 seconds
             setInterval(function() {
                 fetch('/status')
                     .then(response => {
@@ -620,7 +507,6 @@ def index():
                         document.getElementById('distance').textContent = data.distance + 'cm';
                         document.getElementById('servo').textContent = '각도: ' + data.servo_angle + '도';
                         
-                        // OCR 결과 업데이트
                         if (data.ocr_text && data.ocr_text !== "") {
                             document.getElementById('ocr-text').textContent = data.ocr_text;
                             document.getElementById('ocr-text').style.color = '#155724';
@@ -631,7 +517,6 @@ def index():
                             document.getElementById('ocr-text').style.fontWeight = 'normal';
                         }
                         
-                        // 디버그 정보 업데이트
                         if (data.debug_info) {
                             document.getElementById('debug-info').textContent = data.debug_info;
                         }
@@ -684,7 +569,6 @@ if __name__ == '__main__':
         print("시스템 상태: http://localhost:5000/status")
         print("로그 파일: /tmp/parking_system.log")
         
-        # Start ultrasonic sensor thread
         sensor_thread = threading.Thread(target=read_ultrasonic_sensor, daemon=True)
         sensor_thread.start()
         
