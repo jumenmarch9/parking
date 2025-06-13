@@ -14,6 +14,23 @@ import pytesseract
 import re
 import logging
 import os
+import subprocess
+
+# Tesseract 경로 강제 설정 (가장 중요)
+pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
+print("Tesseract 경로 강제 설정 완료")
+
+# 실제 tesseract 경로 자동 찾기 및 설정
+try:
+    result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
+    if result.returncode == 0:
+        tesseract_path = result.stdout.strip()
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        print(f"Tesseract 경로 자동 설정: {tesseract_path}")
+    else:
+        print("Tesseract 경로를 찾을 수 없습니다")
+except Exception as e:
+    print(f"경로 설정 오류: {e}")
 
 # 시스템 인코딩을 UTF-8로 설정
 if sys.stdout.encoding != 'utf-8':
@@ -149,6 +166,7 @@ def preprocess_license_plate(image):
     """Tesseract 5.x 최적화 전처리"""
     try:
         logger.debug("번호판 이미지 전처리 시작")
+        print("이미지 전처리 시작...")
         
         # 그레이스케일 변환
         if len(image.shape) == 3:
@@ -162,6 +180,7 @@ def preprocess_license_plate(image):
             scale = 80 / height
             new_width = int(width * scale)
             gray = cv2.resize(gray, (new_width, 80), interpolation=cv2.INTER_CUBIC)
+            print(f"이미지 크기 조정: {new_width}x80")
         
         # 노이즈 제거
         denoised = cv2.medianBlur(gray, 3)
@@ -178,19 +197,21 @@ def preprocess_license_plate(image):
         processed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         
         logger.debug("번호판 이미지 전처리 완료")
+        print("이미지 전처리 완료")
         return processed
         
     except Exception as e:
         logger.error(f"이미지 전처리 오류: {e}")
+        print(f"이미지 전처리 오류: {e}")
         return image
 
 def extract_text_from_license_plate(license_plate_image):
-    """Tesseract 5.x 최적화 텍스트 추출"""
+    """Tesseract 5.x 최적화 텍스트 추출 - 강제 실행 포함"""
     global ocr_debug_info
     
     try:
+        print("=== OCR 텍스트 추출 강제 시작 ===")
         logger.info("OCR 텍스트 추출 시작")
-        print("OCR 텍스트 추출 시작...")
         
         # 이미지 크기 확인
         height, width = license_plate_image.shape[:2]
@@ -203,24 +224,28 @@ def extract_text_from_license_plate(license_plate_image):
         timestamp = int(time())
         cv2.imwrite(f'/tmp/license_original_{timestamp}.jpg', license_plate_image)
         cv2.imwrite(f'/tmp/license_processed_{timestamp}.jpg', processed_image)
+        print(f"디버깅 이미지 저장: /tmp/license_*_{timestamp}.jpg")
         
-        # Tesseract 5.x 최적화 설정들
+        # Tesseract 5.x 최적화 설정들 (영어 우선으로 시도)
         configs = [
-            '--oem 1 --psm 8',  # LSTM 엔진 + 단일 단어
-            '--oem 1 --psm 7',  # LSTM 엔진 + 단일 텍스트 라인
-            '--oem 1 --psm 6',  # LSTM 엔진 + 단일 블록
-            '--oem 3 --psm 8',  # 기본 + LSTM + 단일 단어
+            ('--oem 1 --psm 8', 'eng'),     # 영어만으로 먼저 시도
+            ('--oem 1 --psm 7', 'eng'),
+            ('--oem 1 --psm 6', 'eng'),
+            ('--oem 1 --psm 11', 'eng'),    # 라즈베리파이에서 효과적
+            ('--oem 1 --psm 8', 'kor+eng'), # 한국어+영어
+            ('--oem 1 --psm 7', 'kor+eng'),
+            ('--oem 3 --psm 8', 'eng'),     # 기본 엔진
         ]
         
-        for config in configs:
+        for config, lang in configs:
             try:
-                print(f"시도 중: {config}")
+                print(f"시도 중: {config} (언어: {lang})")
                 
-                # 한국어+영어 시도
-                text = pytesseract.image_to_string(processed_image, config=config, lang='kor+eng')
+                text = pytesseract.image_to_string(processed_image, config=config, lang=lang)
                 text_clean = text.strip().replace(' ', '').replace('\n', '').replace('\t', '')
                 
-                print(f"결과: '{text_clean}'")
+                print(f"OCR 원본 결과: '{text}'")
+                print(f"OCR 정리 결과: '{text_clean}'")
                 
                 if len(text_clean) >= 3:
                     # 한국 번호판 패턴 검증
@@ -236,29 +261,20 @@ def extract_text_from_license_plate(license_plate_image):
                             ocr_debug_info = f"성공: {config} → {text_clean}"
                             return text_clean
                     
-                    # 부분 매칭
+                    # 부분 매칭 (숫자+한글 포함)
                     if re.search(r'[0-9]', text_clean) and re.search(r'[가-힣]', text_clean):
-                        print(f"부분 매칭: {text_clean}")
+                        print(f"부분 매칭 성공: {text_clean}")
                         ocr_debug_info = f"부분매칭: {config} → {text_clean}"
+                        return text_clean
+                    
+                    # 영문+숫자 조합 (4글자 이상)
+                    if len(text_clean) >= 4 and re.match(r'^[A-Z0-9]+$', text_clean):
+                        print(f"영문 번호판 인식: {text_clean}")
+                        ocr_debug_info = f"영문: {config} → {text_clean}"
                         return text_clean
                 
             except Exception as e:
                 print(f"OCR 오류 ({config}): {e}")
-                continue
-        
-        # 영어만으로 재시도
-        print("영어 모드로 재시도...")
-        for config in configs:
-            try:
-                text = pytesseract.image_to_string(processed_image, config=config, lang='eng')
-                text_clean = text.strip().replace(' ', '').replace('\n', '').replace('\t', '')
-                
-                if len(text_clean) >= 4 and re.match(r'^[A-Z0-9]+$', text_clean):
-                    print(f"영문 번호판: {text_clean}")
-                    ocr_debug_info = f"영문: {config} → {text_clean}"
-                    return text_clean
-                    
-            except Exception as e:
                 continue
         
         print("모든 OCR 시도 실패")
@@ -266,8 +282,8 @@ def extract_text_from_license_plate(license_plate_image):
         return None
         
     except Exception as e:
-        logger.error(f"OCR 오류: {e}")
-        print(f"OCR 오류: {e}")
+        logger.error(f"OCR 전체 오류: {e}")
+        print(f"OCR 전체 오류: {e}")
         ocr_debug_info = f"OCR 오류: {e}"
         return None
 
@@ -330,11 +346,17 @@ def read_ultrasonic_sensor():
             sleep(1)
 
 def detect_objects(frame):
-    """YOLOv5 object detection function with OCR"""
+    """YOLOv5 object detection function with OCR - 강제 OCR 테스트 포함"""
     global latest_ocr_text
     
     try:
         logger.debug("객체 감지 시작")
+        
+        # 강제 OCR 테스트 (디버깅용)
+        print("=== 강제 OCR 테스트 시작 ===")
+        test_img = frame[100:200, 100:400]  # 임의 영역 잘라내기
+        force_ocr_text = extract_text_from_license_plate(test_img)
+        print(f"강제 OCR 결과: {force_ocr_text}")
         
         img = cv2.resize(frame, (320, 320))
         img_input = img[:, :, ::-1].transpose(2, 0, 1)
@@ -372,7 +394,7 @@ def detect_objects(frame):
                 # 번호판 감지 시 OCR 수행
                 if 'license' in names[int(cls)].lower() or 'plate' in names[int(cls)].lower():
                     logger.info("번호판 감지됨 - OCR 시작")
-                    print("번호판 감지됨!")
+                    print("번호판 감지됨! OCR 시작...")
                     
                     # 번호판 영역 잘라내기
                     x1, y1, x2, y2 = xyxy
