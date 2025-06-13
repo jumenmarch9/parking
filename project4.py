@@ -15,13 +15,17 @@ import re
 import logging
 import os
 
-# 로깅 설정
+# 시스템 인코딩을 UTF-8로 설정
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
+# 로깅 설정 (UTF-8 인코딩 명시)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),  # 터미널 출력
-        logging.FileHandler('/tmp/parking_system.log')  # 파일 출력
+        logging.StreamHandler(),
+        logging.FileHandler('/tmp/parking_system.log', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -54,6 +58,19 @@ TOPIC_SERVO = 'parking/servo'
 TOPIC_OCR = 'parking/ocr'
 
 mqtt_client = mqtt.Client()
+
+# 한국어 메시지 전송을 위한 안전한 MQTT 함수
+def safe_mqtt_publish(topic, message):
+    try:
+        if isinstance(message, str):
+            # 한국어가 포함된 경우 UTF-8로 인코딩하여 전송
+            mqtt_client.publish(topic, message.encode('utf-8'))
+        else:
+            mqtt_client.publish(topic, message)
+    except UnicodeEncodeError:
+        # 인코딩 실패 시 영문으로 대체
+        mqtt_client.publish(topic, "Korean text detected")
+        logger.warning(f"MQTT 메시지 인코딩 실패: {topic}")
 
 def on_mqtt_connect(client, userdata, flags, rc):
     if rc == 0:
@@ -250,8 +267,8 @@ def control_servo_motor(angle):
         servo_motor.value = max(-1, min(1, servo_value))
         servo_position = angle
         
-        # Send MQTT message
-        mqtt_client.publish(TOPIC_SERVO, f"Servo angle: {angle}")
+        # Send MQTT message (안전한 전송)
+        safe_mqtt_publish(TOPIC_SERVO, f"Servo angle: {angle}")
         logger.info(f"서보 모터 {angle}도로 이동")
         print(f"서보 모터: {angle}도")
     except Exception as e:
@@ -276,21 +293,21 @@ def read_ultrasonic_sensor():
                 new_status = "occupied"
                 if parking_status != new_status:
                     control_servo_motor(90)  # Open gate
-                    mqtt_client.publish(TOPIC_STATUS, "vehicle_detected")
+                    safe_mqtt_publish(TOPIC_STATUS, "vehicle_detected")
                     logger.info("차량 감지 - 게이트 열림")
                     print("차량 감지!")
             else:
                 new_status = "empty"
                 if parking_status != new_status:
                     control_servo_motor(0)   # Close gate
-                    mqtt_client.publish(TOPIC_STATUS, "vehicle_left")
+                    safe_mqtt_publish(TOPIC_STATUS, "vehicle_left")
                     logger.info("차량 이탈 - 게이트 닫힘")
                     print("차량 이탈")
             
             parking_status = new_status
             
-            # Send distance data via MQTT
-            mqtt_client.publish(TOPIC_SENSOR, f"Distance: {distance_cm:.2f}cm")
+            # Send distance data via MQTT (안전한 전송)
+            safe_mqtt_publish(TOPIC_SENSOR, f"Distance: {distance_cm:.2f}cm")
             
             sleep(0.5)  # Read every 0.5 seconds
             
@@ -365,8 +382,8 @@ def detect_objects(frame):
                             label = f'{names[int(cls)]} {conf:.2f} [{ocr_text}]'
                             license_plates_detected.append(f"{names[int(cls)]} - OCR: {ocr_text}")
                             
-                            # MQTT로 OCR 결과 전송
-                            mqtt_client.publish(TOPIC_OCR, f"License Plate: {ocr_text}")
+                            # MQTT로 OCR 결과 전송 (안전한 전송)
+                            safe_mqtt_publish(TOPIC_OCR, f"License Plate: {ocr_text}")
                             logger.info(f"OCR 성공: {ocr_text}")
                             print(f"OCR 성공: {ocr_text}")
                             
@@ -382,11 +399,11 @@ def detect_objects(frame):
                     'confidence': float(conf)
                 })
         
-        # Send MQTT message if license plate detected
+        # Send MQTT message if license plate detected (안전한 전송)
         if license_plates_detected:
             try:
-                mqtt_client.publish(TOPIC_STATUS, "license_plate_detected")
-                mqtt_client.publish(TOPIC_LICENSE, f"Detected: {', '.join(license_plates_detected)}")
+                safe_mqtt_publish(TOPIC_STATUS, "license_plate_detected")
+                safe_mqtt_publish(TOPIC_LICENSE, f"Detected: {', '.join(license_plates_detected)}")
                 logger.info(f"MQTT 전송: {license_plates_detected}")
                 print(f"MQTT 전송: {license_plates_detected}")
                 
