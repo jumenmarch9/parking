@@ -13,7 +13,7 @@ from time import time
 import re
 import logging
 import os
-from paddleocr import PaddleOCR
+import easyocr
 
 # 시스템 인코딩을 UTF-8로 설정
 if sys.stdout.encoding != 'utf-8':
@@ -99,12 +99,17 @@ stride, names = model.stride, model.names
 logger.info(f"YOLOv5 모델 로드 완료. 클래스: {names}")
 print(f"YOLOv5 모델 로드 완료. 감지 클래스: {names}")
 
-# PaddleOCR 초기화
-logger.info("PaddleOCR 초기화 시작...")
-print("PaddleOCR 초기화 중...")
-ocr = PaddleOCR(use_angle_cls=True, lang='korean')
-logger.info("PaddleOCR 초기화 완료")
-print("PaddleOCR 초기화 완료")
+# EasyOCR 초기화
+logger.info("EasyOCR 초기화 시작...")
+print("EasyOCR 초기화 중...")
+try:
+    reader = easyocr.Reader(['ko', 'en'])
+    logger.info("EasyOCR 초기화 완료 (한국어 + 영어)")
+    print("EasyOCR 초기화 완료 (한국어 + 영어)")
+except Exception as e:
+    logger.warning(f"한국어 모델 로드 실패, 영어만 사용: {e}")
+    reader = easyocr.Reader(['en'])
+    print("EasyOCR 초기화 완료 (영어만)")
 
 # Picamera2 initialization
 try:
@@ -133,61 +138,73 @@ latest_ocr_text = ""
 ocr_debug_info = ""
 
 def extract_text_from_license_plate(license_plate_image):
-    """PaddleOCR을 사용한 번호판 텍스트 추출"""
+    """EasyOCR을 사용한 번호판 텍스트 추출"""
     global ocr_debug_info
     
     try:
-        logger.info("PaddleOCR 텍스트 추출 시작")
-        print("PaddleOCR 텍스트 추출 시작...")
+        logger.info("EasyOCR 텍스트 추출 시작")
+        print("EasyOCR 텍스트 추출 시작...")
         
-        # PaddleOCR 실행
-        result = ocr.ocr(license_plate_image)
+        # 이미지 크기 확인
+        height, width = license_plate_image.shape[:2]
+        print(f"번호판 이미지 크기: {width}x{height}")
         
-        if result and result[0]:
-            for line in result[0]:
-                if len(line) >= 2:
-                    text = line[1][0]  # 텍스트
-                    confidence = line[1][1]  # 신뢰도
-                    
-                    print(f"PaddleOCR 결과: '{text}', 신뢰도: {confidence:.2f}")
-                    
-                    if confidence > 0.5:  # 신뢰도 50% 이상
-                        # 텍스트 정리
-                        clean_text = text.replace(' ', '').replace('\n', '').replace('\t', '')
-                        
-                        # 한국 번호판 패턴 검증
-                        korean_plate_patterns = [
-                            r'^[0-9]{2,3}[가-힣][0-9]{4}$',  # 일반: 12가3456, 123가4567
-                            r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',  # 신형: 서울12가3456
-                            r'^[0-9]{2}[가-힣][0-9]{4}$'   # 2자리: 12가3456
-                        ]
-                        
-                        for pattern in korean_plate_patterns:
-                            if re.match(pattern, clean_text):
-                                print(f"번호판 패턴 매칭 성공: {clean_text}")
-                                ocr_debug_info = f"성공: {clean_text} (신뢰도: {confidence:.2f})"
-                                return clean_text
-                        
-                        # 부분 매칭 (숫자+한글 포함)
-                        if len(clean_text) >= 4 and re.search(r'[0-9]', clean_text) and re.search(r'[가-힣]', clean_text):
-                            print(f"부분 매칭 성공: {clean_text}")
-                            ocr_debug_info = f"부분매칭: {clean_text} (신뢰도: {confidence:.2f})"
-                            return clean_text
-                        
-                        # 영문+숫자 조합
-                        if len(clean_text) >= 4 and re.match(r'^[A-Z0-9]+$', clean_text):
-                            print(f"영문 번호판: {clean_text}")
-                            ocr_debug_info = f"영문: {clean_text} (신뢰도: {confidence:.2f})"
-                            return clean_text
+        # 디버깅용 이미지 저장
+        timestamp = int(time())
+        cv2.imwrite(f'/tmp/license_easy_{timestamp}.jpg', license_plate_image)
+        print(f"디버깅 이미지 저장: /tmp/license_easy_{timestamp}.jpg")
         
-        print("PaddleOCR 인식 실패")
+        # EasyOCR 실행
+        results = reader.readtext(license_plate_image)
+        
+        print(f"EasyOCR 감지된 텍스트 수: {len(results)}")
+        
+        for (bbox, text, confidence) in results:
+            print(f"EasyOCR 결과: '{text}', 신뢰도: {confidence:.2f}")
+            
+            if confidence > 0.5:  # 신뢰도 50% 이상
+                # 텍스트 정리
+                clean_text = text.replace(' ', '').replace('\n', '').replace('\t', '')
+                
+                # 한국 번호판 패턴 검증
+                korean_plate_patterns = [
+                    r'^[0-9]{2,3}[가-힣][0-9]{4}$',  # 일반: 12가3456, 123가4567
+                    r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',  # 신형: 서울12가3456
+                    r'^[0-9]{2}[가-힣][0-9]{4}$'   # 2자리: 12가3456
+                ]
+                
+                for pattern in korean_plate_patterns:
+                    if re.match(pattern, clean_text):
+                        print(f"번호판 패턴 매칭 성공: {clean_text}")
+                        ocr_debug_info = f"성공: {clean_text} (신뢰도: {confidence:.2f})"
+                        return clean_text
+                
+                # 부분 매칭 (숫자+한글 포함)
+                if len(clean_text) >= 4 and re.search(r'[0-9]', clean_text) and re.search(r'[가-힣]', clean_text):
+                    print(f"부분 매칭 성공: {clean_text}")
+                    ocr_debug_info = f"부분매칭: {clean_text} (신뢰도: {confidence:.2f})"
+                    return clean_text
+                
+                # 영문+숫자 조합 (4글자 이상)
+                if len(clean_text) >= 4 and re.match(r'^[A-Z0-9]+$', clean_text):
+                    print(f"영문 번호판: {clean_text}")
+                    ocr_debug_info = f"영문: {clean_text} (신뢰도: {confidence:.2f})"
+                    return clean_text
+                
+                # 신뢰도가 높은 경우 그대로 반환
+                if confidence > 0.8 and len(clean_text) >= 3:
+                    print(f"고신뢰도 텍스트: {clean_text}")
+                    ocr_debug_info = f"고신뢰도: {clean_text} (신뢰도: {confidence:.2f})"
+                    return clean_text
+        
+        print("EasyOCR 인식 실패")
         ocr_debug_info = "인식된 텍스트 없음"
         return None
         
     except Exception as e:
-        logger.error(f"PaddleOCR 오류: {e}")
-        print(f"PaddleOCR 오류: {e}")
-        ocr_debug_info = f"PaddleOCR 오류: {e}"
+        logger.error(f"EasyOCR 오류: {e}")
+        print(f"EasyOCR 오류: {e}")
+        ocr_debug_info = f"EasyOCR 오류: {e}"
         return None
 
 def control_servo_motor(angle):
@@ -242,7 +259,7 @@ def read_ultrasonic_sensor():
             sleep(1)
 
 def detect_objects(frame):
-    """YOLOv5 object detection function with PaddleOCR"""
+    """YOLOv5 object detection function with EasyOCR"""
     global latest_ocr_text
     
     try:
@@ -281,10 +298,10 @@ def detect_objects(frame):
                 logger.info(f"객체 감지: {names[int(cls)]} (신뢰도: {conf:.2f})")
                 print(f"감지: {names[int(cls)]} (신뢰도: {conf:.2f})")
                 
-                # 번호판 감지 시 PaddleOCR 수행
+                # 번호판 감지 시 EasyOCR 수행
                 if 'license' in names[int(cls)].lower() or 'plate' in names[int(cls)].lower():
-                    logger.info("번호판 감지됨 - PaddleOCR 시작")
-                    print("번호판 감지됨! PaddleOCR 시작...")
+                    logger.info("번호판 감지됨 - EasyOCR 시작")
+                    print("번호판 감지됨! EasyOCR 시작...")
                     
                     # 번호판 영역 잘라내기
                     x1, y1, x2, y2 = xyxy
@@ -299,11 +316,7 @@ def detect_objects(frame):
                     if x2 > x1 and y2 > y1:  # 유효한 영역인지 확인
                         license_plate_crop = frame[y1:y2, x1:x2]
                         
-                        # 디버깅용 이미지 저장
-                        timestamp = int(time())
-                        cv2.imwrite(f'/tmp/license_paddle_{timestamp}.jpg', license_plate_crop)
-                        
-                        # PaddleOCR 텍스트 추출
+                        # EasyOCR 텍스트 추출
                         ocr_text = extract_text_from_license_plate(license_plate_crop)
                         
                         if ocr_text:
@@ -313,13 +326,13 @@ def detect_objects(frame):
                             
                             # MQTT로 OCR 결과 전송
                             safe_mqtt_publish(TOPIC_OCR, f"License Plate: {ocr_text}")
-                            logger.info(f"PaddleOCR 성공: {ocr_text}")
-                            print(f"PaddleOCR 성공: {ocr_text}")
+                            logger.info(f"EasyOCR 성공: {ocr_text}")
+                            print(f"EasyOCR 성공: {ocr_text}")
                             
                         else:
                             license_plates_detected.append(label)
-                            logger.warning("PaddleOCR 실패")
-                            print("PaddleOCR 실패")
+                            logger.warning("EasyOCR 실패")
+                            print("EasyOCR 실패")
                 
                 detections.append({
                     'bbox': xyxy,
@@ -421,7 +434,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Smart Parking System with PaddleOCR</title>
+        <title>Smart Parking System with EasyOCR</title>
         <style>
             body { font-family: Arial, sans-serif; text-align: center; background-color: #f5f5f5; }
             .container { max-width: 1000px; margin: 0 auto; padding: 20px; background-color: white; border-radius: 10px; }
@@ -436,14 +449,14 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>스마트 주차 관리 시스템 (PaddleOCR 지원)</h1>
+            <h1>스마트 주차 관리 시스템 (EasyOCR 지원)</h1>
             
             <div class="video-container">
                 <img src="{{ url_for('video_feed') }}" width="640" height="480" alt="Camera Feed">
             </div>
             
             <div class="ocr-result">
-                <h4>최근 PaddleOCR 결과</h4>
+                <h4>최근 EasyOCR 결과</h4>
                 <p id="ocr-text">대기 중...</p>
             </div>
             
@@ -455,7 +468,7 @@ def index():
             <div class="status-grid">
                 <div class="status-box">
                     <h4>카메라 상태</h4>
-                    <p>실시간 번호판 감지 + PaddleOCR</p>
+                    <p>실시간 번호판 감지 + EasyOCR</p>
                 </div>
                 <div class="status-box">
                     <h4>거리 센서</h4>
