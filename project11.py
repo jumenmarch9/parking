@@ -6,8 +6,8 @@ import numpy as np
 from time import sleep
 import paho.mqtt.client as mqtt
 import threading
-import RPi.GPIO as GPIO
-from gpiozero import DistanceSensor, Servo
+# import RPi.GPIO as GPIO  # 주석처리
+# from gpiozero import DistanceSensor, Servo  # 주석처리
 from time import time
 import pytesseract
 import re
@@ -55,14 +55,14 @@ from utils.torch_utils import select_device
 # Flask app initialization
 app = Flask(__name__)
 
-# GPIO setup for ultrasonic sensor and servo motor
-TRIG_PIN = 17
-ECHO_PIN = 27
-SERVO_PIN = 18
+# GPIO setup for ultrasonic sensor and servo motor - 주석처리
+# TRIG_PIN = 17
+# ECHO_PIN = 27
+# SERVO_PIN = 18
 
-# Initialize GPIO components
-ultrasonic_sensor = DistanceSensor(echo=ECHO_PIN, trigger=TRIG_PIN)
-servo_motor = Servo(SERVO_PIN)
+# Initialize GPIO components - 주석처리
+# ultrasonic_sensor = DistanceSensor(echo=ECHO_PIN, trigger=TRIG_PIN)
+# servo_motor = Servo(SERVO_PIN)
 
 # MQTT setup
 MQTT_BROKER = 'localhost'
@@ -115,23 +115,50 @@ stride, names = model.stride, model.names
 logger.info(f"YOLOv5 model loaded successfully. Classes: {names}")
 print(f"YOLOv5 model loaded successfully. Detection classes: {names}")
 
-# Tesseract 설치 확인
-try:
-    tesseract_version = pytesseract.get_tesseract_version()
-    logger.info(f"Tesseract version: {tesseract_version}")
-    print(f"Tesseract OCR version: {tesseract_version}")
+# Tesseract 설치 확인 및 디버깅
+def check_tesseract_installation():
+    """Tesseract 설치 상태 상세 확인"""
+    print("=== Tesseract Installation Debug ===")
     
-    # Tesseract 언어 확인
-    langs = pytesseract.get_languages()
-    print(f"Available languages: {langs}")
-    if 'kor' in langs:
-        print("Korean support: OK")
-    else:
-        print("Korean support: Not available")
+    try:
+        # 1. 버전 확인
+        tesseract_version = pytesseract.get_tesseract_version()
+        print(f"Tesseract version: {tesseract_version}")
+        logger.info(f"Tesseract version: {tesseract_version}")
         
-except Exception as e:
-    logger.error(f"Tesseract error: {e}")
-    print(f"Tesseract error: {e}")
+        # 2. 언어 팩 확인
+        langs = pytesseract.get_languages()
+        print(f"Available languages: {langs}")
+        
+        if 'kor' in langs:
+            print("Korean support: OK")
+        else:
+            print("Korean support: Not available")
+        
+        if 'eng' in langs:
+            print("English support: OK")
+        else:
+            print("English support: Not available")
+            
+        # 3. 경로 확인
+        print(f"Tesseract command path: {pytesseract.pytesseract.tesseract_cmd}")
+        
+        # 4. 명령줄 테스트
+        result = subprocess.run(['tesseract', '--version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("Command line tesseract works")
+        else:
+            print("Command line tesseract failed")
+            
+        return True
+        
+    except Exception as e:
+        print(f"Tesseract installation error: {e}")
+        logger.error(f"Tesseract error: {e}")
+        return False
+
+# Tesseract 설치 확인 실행
+tesseract_available = check_tesseract_installation()
 
 # 웹캠 초기화
 try:
@@ -157,17 +184,23 @@ except Exception as e:
 # Global variables
 latest_detections = []
 detection_lock = threading.Lock()
-current_distance = 0
-servo_position = 0
+current_distance = 0  # 더미 값
+servo_position = 0    # 더미 값
 parking_status = "empty"
 latest_ocr_text = ""
 ocr_debug_info = ""
 
-def preprocess_license_plate(image):
-    """Tesseract 최적화 전처리"""
+def create_test_image():
+    """OCR 테스트용 간단한 이미지 생성"""
+    img = np.ones((100, 400, 3), dtype=np.uint8) * 255
+    cv2.putText(img, 'TEST123', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.putText(img, '12가3456', (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+    return img
+
+def enhanced_preprocessing(image):
+    """강화된 이미지 전처리"""
     try:
-        logger.debug("License plate image preprocessing started")
-        print("Image preprocessing started...")
+        print("Enhanced preprocessing started...")
         
         # 그레이스케일 변환
         if len(image.shape) == 3:
@@ -175,144 +208,230 @@ def preprocess_license_plate(image):
         else:
             gray = image.copy()
         
-        # 이미지 크기 조정
-        height, width = gray.shape
-        if height < 80:
-            scale = 80 / height
-            new_width = int(width * scale)
-            gray = cv2.resize(gray, (new_width, 80), interpolation=cv2.INTER_CUBIC)
-            print(f"Image resized: {new_width}x80")
+        print(f"Original image size: {gray.shape}")
         
-        # 노이즈 제거
-        denoised = cv2.medianBlur(gray, 3)
+        # 가우시안 블러 적용
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
         # 대비 향상
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(denoised)
+        enhanced = clahe.apply(blurred)
         
-        # 이진화
-        _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 이미지 크기 확대 (OCR 성능 향상)
+        height, width = enhanced.shape
+        if height < 100:
+            scale = 100 / height
+            new_width = int(width * scale)
+            enhanced = cv2.resize(enhanced, (new_width, 100), interpolation=cv2.INTER_CUBIC)
+            print(f"Resized to: {new_width}x100")
+        
+        # 임계값 처리
+        _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
         # 모폴로지 연산
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        processed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
         
-        logger.debug("License plate image preprocessing completed")
-        print("Image preprocessing completed")
+        print("Enhanced preprocessing completed")
         return processed
         
     except Exception as e:
-        logger.error(f"Image preprocessing error: {e}")
-        print(f"Image preprocessing error: {e}")
+        print(f"Enhanced preprocessing error: {e}")
         return image
 
+def test_multiple_psm_modes(image):
+    """다양한 PSM 모드로 OCR 테스트"""
+    print("Testing multiple PSM modes...")
+    
+    psm_modes = [
+        ('--psm 6', 'Uniform text block'),
+        ('--psm 7', 'Single text line'),
+        ('--psm 8', 'Single word'),
+        ('--psm 11', 'Sparse text'),
+        ('--psm 13', 'Raw line'),
+        ('--oem 1 --psm 8', 'LSTM + Single word'),
+        ('--oem 3 --psm 8', 'Default + Single word')
+    ]
+    
+    for config, description in psm_modes:
+        try:
+            print(f"Testing: {config} ({description})")
+            
+            # 영어로 먼저 시도
+            text_eng = pytesseract.image_to_string(image, config=config, lang='eng')
+            text_eng_clean = text_eng.strip().replace(' ', '').replace('\n', '').replace('\t', '')
+            
+            print(f"   English result: '{text_eng_clean}' (length: {len(text_eng_clean)})")
+            
+            if text_eng_clean and len(text_eng_clean) >= 3:
+                print(f"   Success with English: {text_eng_clean}")
+                return text_eng_clean, config
+            
+            # 한국어+영어로 시도 (한국어 지원 시)
+            if tesseract_available and 'kor' in pytesseract.get_languages():
+                text_kor = pytesseract.image_to_string(image, config=config, lang='kor+eng')
+                text_kor_clean = text_kor.strip().replace(' ', '').replace('\n', '').replace('\t', '')
+                
+                print(f"   Korean result: '{text_kor_clean}' (length: {len(text_kor_clean)})")
+                
+                if text_kor_clean and len(text_kor_clean) >= 3:
+                    print(f"   Success with Korean: {text_kor_clean}")
+                    return text_kor_clean, config
+            
+            print(f"   No result with {config}")
+                    
+        except Exception as e:
+            print(f"   Error with {config}: {e}")
+    
+    print("All PSM modes failed")
+    return None, None
+
+def debug_ocr_process(image, save_debug_images=True):
+    """OCR 과정 상세 디버깅"""
+    print("\n" + "="*50)
+    print("DETAILED OCR DEBUGGING STARTED")
+    print("="*50)
+    
+    try:
+        timestamp = int(time())
+        
+        # 1. 원본 이미지 정보
+        print(f"Original image info:")
+        print(f"   - Shape: {image.shape}")
+        print(f"   - Data type: {image.dtype}")
+        print(f"   - Min/Max values: {image.min()}/{image.max()}")
+        
+        # 2. 디버깅 이미지 저장
+        if save_debug_images:
+            original_path = f'/tmp/debug_original_{timestamp}.jpg'
+            cv2.imwrite(original_path, image)
+            print(f"Original image saved: {original_path}")
+        
+        # 3. 전처리 적용
+        processed = enhanced_preprocessing(image)
+        
+        if save_debug_images:
+            processed_path = f'/tmp/debug_processed_{timestamp}.jpg'
+            cv2.imwrite(processed_path, processed)
+            print(f"Processed image saved: {processed_path}")
+        
+        # 4. 다양한 PSM 모드 테스트
+        result_text, best_config = test_multiple_psm_modes(processed)
+        
+        # 5. 결과 분석
+        if result_text:
+            print(f"\nOCR SUCCESS!")
+            print(f"   - Best config: {best_config}")
+            print(f"   - Result: '{result_text}'")
+            print(f"   - Length: {len(result_text)}")
+            
+            # 번호판 패턴 검증
+            korean_patterns = [
+                (r'^[0-9]{2,3}[가-힣][0-9]{4}$', 'Standard Korean plate'),
+                (r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$', 'New Korean plate'),
+                (r'^[0-9]{2}[가-힣][0-9]{4}$', 'Short Korean plate'),
+                (r'^[A-Z0-9]{4,}$', 'English/Number plate')
+            ]
+            
+            pattern_matched = False
+            for pattern, description in korean_patterns:
+                if re.match(pattern, result_text):
+                    print(f"   Pattern match: {description}")
+                    pattern_matched = True
+                    break
+            
+            if not pattern_matched:
+                print(f"   No standard pattern match, but text detected")
+            
+            return result_text, best_config
+        else:
+            print(f"\nOCR FAILED!")
+            print(f"   - No text detected with any configuration")
+            return None, None
+        
+    except Exception as e:
+        print(f"\nOCR DEBUGGING ERROR: {e}")
+        logger.error(f"OCR debugging error: {e}")
+        return None, None
+    finally:
+        print("="*50)
+        print("OCR DEBUGGING COMPLETED")
+        print("="*50 + "\n")
+
 def extract_text_from_license_plate(license_plate_image):
-    """Tesseract를 사용한 번호판 텍스트 추출"""
+    """강화된 디버깅이 포함된 번호판 텍스트 추출"""
     global ocr_debug_info
     
     try:
-        print("=== Tesseract OCR text extraction started ===")
-        logger.info("Tesseract OCR text extraction started")
+        print("\nLICENSE PLATE OCR EXTRACTION STARTED")
         
         # 이미지 크기 확인
         height, width = license_plate_image.shape[:2]
         print(f"License plate image size: {width}x{height}")
         
-        # 전처리 적용
-        processed_image = preprocess_license_plate(license_plate_image)
+        # 상세 디버깅 실행
+        ocr_text, best_config = debug_ocr_process(license_plate_image)
         
-        # 디버깅용 이미지 저장
-        timestamp = int(time())
-        cv2.imwrite(f'/tmp/license_original_{timestamp}.jpg', license_plate_image)
-        cv2.imwrite(f'/tmp/license_processed_{timestamp}.jpg', processed_image)
-        print(f"Debug images saved: /tmp/license_*_{timestamp}.jpg")
-        
-        # Tesseract 설정들 (영어 우선으로 시도)
-        configs = [
-            ('--oem 1 --psm 8', 'eng'),     # 영어만으로 먼저 시도
-            ('--oem 1 --psm 7', 'eng'),
-            ('--oem 1 --psm 6', 'eng'),
-            ('--oem 1 --psm 11', 'eng'),   # 라즈베리파이에서 효과적
-            ('--oem 1 --psm 8', 'kor+eng'), # 한국어+영어
-            ('--oem 1 --psm 7', 'kor+eng'),
-            ('--oem 3 --psm 8', 'eng'),    # 기본 엔진
-        ]
-        
-        for config, lang in configs:
-            try:
-                print(f"Trying: {config} (language: {lang})")
-                
-                text = pytesseract.image_to_string(processed_image, config=config, lang=lang)
-                text_clean = text.strip().replace(' ', '').replace('\n', '').replace('\t', '')
-                
-                print(f"OCR raw result: '{text}'")
-                print(f"OCR cleaned result: '{text_clean}'")
-                
-                if len(text_clean) >= 3:
-                    # 한국 번호판 패턴 검증
-                    korean_plate_patterns = [
-                        r'^[0-9]{2,3}[가-힣][0-9]{4}$',
-                        r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',
-                        r'^[0-9]{2}[가-힣][0-9]{4}$'
-                    ]
-                    
-                    for pattern in korean_plate_patterns:
-                        if re.match(pattern, text_clean):
-                            print(f"License plate pattern match successful: {text_clean}")
-                            ocr_debug_info = f"Success: {config} → {text_clean}"
-                            return text_clean
-                    
-                    # 부분 매칭 (숫자+한글 포함)
-                    if re.search(r'[0-9]', text_clean) and re.search(r'[가-힣]', text_clean):
-                        print(f"Partial match successful: {text_clean}")
-                        ocr_debug_info = f"Partial match: {config} → {text_clean}"
-                        return text_clean
-                    
-                    # 영문+숫자 조합 (4글자 이상)
-                    if len(text_clean) >= 4 and re.match(r'^[A-Z0-9]+$', text_clean):
-                        print(f"English license plate recognized: {text_clean}")
-                        ocr_debug_info = f"English: {config} → {text_clean}"
-                        return text_clean
-                
-            except Exception as e:
-                print(f"OCR error ({config}): {e}")
-                continue
-        
-        print("All OCR attempts failed")
-        ocr_debug_info = "All attempts failed"
-        return None
+        if ocr_text:
+            ocr_debug_info = f"Success: {best_config} → {ocr_text}"
+            print(f"Final OCR result: {ocr_text}")
+            return ocr_text
+        else:
+            ocr_debug_info = "All OCR attempts failed"
+            print(f"Final OCR result: Failed")
+            return None
         
     except Exception as e:
-        logger.error(f"OCR overall error: {e}")
-        print(f"OCR overall error: {e}")
-        ocr_debug_info = f"OCR error: {e}"
+        error_msg = f"OCR extraction error: {e}"
+        print(f"{error_msg}")
+        logger.error(error_msg)
+        ocr_debug_info = error_msg
         return None
 
+def run_ocr_test():
+    """OCR 기능 테스트 실행"""
+    print("\nRUNNING OCR FUNCTIONALITY TEST")
+    print("="*40)
+    
+    # 테스트 이미지 생성
+    test_img = create_test_image()
+    cv2.imwrite('/tmp/ocr_test_image.jpg', test_img)
+    print("Test image created and saved")
+    
+    # OCR 테스트 실행
+    result = extract_text_from_license_plate(test_img)
+    
+    if result:
+        print(f"OCR Test PASSED: '{result}'")
+    else:
+        print("OCR Test FAILED")
+    
+    print("="*40)
+    return result
+
+# 더미 서보모터 제어 함수
 def control_servo_motor(angle):
-    """Control servo motor angle (0-180 degrees)"""
+    """더미 서보모터 제어 (실제 하드웨어 없이 시뮬레이션)"""
     global servo_position
-    try:
-        servo_value = (angle - 90) / 90.0
-        servo_motor.value = max(-1, min(1, servo_value))
-        servo_position = angle
-        
-        safe_mqtt_publish(TOPIC_SERVO, f"Servo angle: {angle}")
-        logger.info(f"Servo motor moved to {angle} degrees")
-        print(f"Servo motor: {angle} degrees")
-    except Exception as e:
-        logger.error(f"Servo motor control error: {e}")
-        print(f"Servo motor error: {e}")
+    servo_position = angle
+    safe_mqtt_publish(TOPIC_SERVO, f"Servo angle: {angle}")
+    logger.info(f"[DUMMY] Servo motor moved to {angle} degrees")
+    print(f"[DUMMY] Servo motor: {angle} degrees")
 
+# 더미 초음파센서 함수
 def read_ultrasonic_sensor():
-    """Read distance from ultrasonic sensor"""
+    """더미 초음파센서 (실제 하드웨어 없이 시뮬레이션)"""
     global current_distance, parking_status
     
-    logger.info("Ultrasonic sensor thread started")
-    print("Ultrasonic sensor started")
+    logger.info("[DUMMY] Ultrasonic sensor thread started")
+    print("[DUMMY] Ultrasonic sensor simulation started")
+    
+    import random
     
     while True:
         try:
-            distance_cm = ultrasonic_sensor.distance * 100
+            # 랜덤한 거리 값 생성 (10-50cm)
+            distance_cm = random.uniform(10, 50)
             current_distance = distance_cm
             
             if distance_cm < 20:  # Object within 20cm
@@ -320,27 +439,27 @@ def read_ultrasonic_sensor():
                 if parking_status != new_status:
                     control_servo_motor(90)  # Open gate
                     safe_mqtt_publish(TOPIC_STATUS, "vehicle_detected")
-                    logger.info("Vehicle detected - Gate opened")
-                    print("Vehicle detected!")
+                    logger.info("[DUMMY] Vehicle detected - Gate opened")
+                    print("[DUMMY] Vehicle detected!")
             else:
                 new_status = "empty"
                 if parking_status != new_status:
                     control_servo_motor(0)   # Close gate
                     safe_mqtt_publish(TOPIC_STATUS, "vehicle_left")
-                    logger.info("Vehicle left - Gate closed")
-                    print("Vehicle left")
+                    logger.info("[DUMMY] Vehicle left - Gate closed")
+                    print("[DUMMY] Vehicle left")
             
             parking_status = new_status
             safe_mqtt_publish(TOPIC_SENSOR, f"Distance: {distance_cm:.2f}cm")
-            sleep(0.5)
+            sleep(2)  # 2초마다 업데이트
             
         except Exception as e:
-            logger.error(f"Ultrasonic sensor error: {e}")
-            print(f"Sensor error: {e}")
+            logger.error(f"[DUMMY] Ultrasonic sensor error: {e}")
+            print(f"[DUMMY] Sensor error: {e}")
             sleep(1)
 
 def detect_objects(frame):
-    """YOLOv5 object detection function with Tesseract OCR"""
+    """YOLOv5 object detection function with enhanced Tesseract OCR debugging"""
     global latest_ocr_text
     
     try:
@@ -379,16 +498,16 @@ def detect_objects(frame):
                 logger.info(f"Object detected: {names[int(cls)]} (confidence: {conf:.2f})")
                 print(f"Detected: {names[int(cls)]} (confidence: {conf:.2f})")
                 
-                # 번호판 감지 시 Tesseract OCR 수행
+                # 번호판 감지 시 강화된 Tesseract OCR 수행
                 if 'license' in names[int(cls)].lower() or 'plate' in names[int(cls)].lower():
-                    logger.info("License plate detected - Tesseract OCR started")
-                    print("License plate detected! Tesseract OCR started...")
+                    logger.info("License plate detected - Enhanced Tesseract OCR started")
+                    print("License plate detected! Enhanced Tesseract OCR started...")
                     
                     # 번호판 영역 잘라내기
                     x1, y1, x2, y2 = xyxy
                     
                     # 경계 확인 및 여유 공간 추가
-                    margin = 5
+                    margin = 10  # 여유 공간 증가
                     x1 = max(0, x1 - margin)
                     y1 = max(0, y1 - margin)
                     x2 = min(frame.shape[1], x2 + margin)
@@ -397,7 +516,7 @@ def detect_objects(frame):
                     if x2 > x1 and y2 > y1:  # 유효한 영역인지 확인
                         license_plate_crop = frame[y1:y2, x1:x2]
                         
-                        # Tesseract OCR 텍스트 추출
+                        # 강화된 Tesseract OCR 텍스트 추출
                         ocr_text = extract_text_from_license_plate(license_plate_crop)
                         
                         if ocr_text:
@@ -407,13 +526,13 @@ def detect_objects(frame):
                             
                             # MQTT로 OCR 결과 전송
                             safe_mqtt_publish(TOPIC_OCR, f"License Plate: {ocr_text}")
-                            logger.info(f"Tesseract OCR successful: {ocr_text}")
-                            print(f"Tesseract OCR successful: {ocr_text}")
+                            logger.info(f"Enhanced Tesseract OCR successful: {ocr_text}")
+                            print(f"Enhanced Tesseract OCR successful: {ocr_text}")
                             
                         else:
                             license_plates_detected.append(label)
-                            logger.warning("Tesseract OCR failed")
-                            print("Tesseract OCR failed")
+                            logger.warning("Enhanced Tesseract OCR failed")
+                            print("Enhanced Tesseract OCR failed")
                 
                 detections.append({
                     'bbox': xyxy,
@@ -486,17 +605,21 @@ def generate_frames():
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
             # Draw sensor information on frame
-            cv2.putText(frame, f"Distance: {current_distance:.1f}cm", (10, 30), 
+            cv2.putText(frame, f"Distance: {current_distance:.1f}cm [DUMMY]", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, f"Status: {parking_status}", (10, 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, f"Servo: {servo_position}°", (10, 90), 
+            cv2.putText(frame, f"Servo: {servo_position}° [DUMMY]", (10, 90), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             # OCR 결과 표시
             if latest_ocr_text:
                 cv2.putText(frame, f"OCR: {latest_ocr_text}", (10, 120), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # 디버깅 정보 표시
+            cv2.putText(frame, f"Debug: {ocr_debug_info[:50]}", (10, 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
             
             ret, buffer = cv2.imencode('.jpg', frame)
             if not ret:
@@ -518,7 +641,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Smart Parking System with Tesseract OCR</title>
+        <title>Smart Parking System - OCR Debug Mode</title>
         <style>
             body { font-family: Arial, sans-serif; text-align: center; background-color: #f5f5f5; }
             .container { max-width: 1000px; margin: 0 auto; padding: 20px; background-color: white; border-radius: 10px; }
@@ -529,11 +652,18 @@ def index():
             .btn { padding: 10px 20px; margin: 5px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }
             .ocr-result { background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; margin: 10px 0; border-radius: 5px; }
             .debug-info { background-color: #f8f9fa; border: 1px solid #dee2e6; padding: 10px; margin: 10px 0; border-radius: 5px; font-family: monospace; font-size: 12px; }
+            .debug-mode { background-color: #d4edda; border: 1px solid #c3e6cb; padding: 10px; margin: 10px 0; border-radius: 5px; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>스마트 주차 관리 시스템 (Tesseract OCR 지원)</h1>
+            <h1>스마트 주차 관리 시스템 (OCR 디버그 모드)</h1>
+            
+            <div class="debug-mode">
+                <h4>디버그 모드 활성화</h4>
+                <p>서보모터와 초음파센서는 시뮬레이션으로 작동합니다.</p>
+                <p>Tesseract OCR 상세 디버깅이 활성화되었습니다.</p>
+            </div>
             
             <div class="video-container">
                 <img src="{{ url_for('video_feed') }}" width="640" height="480" alt="Camera Feed">
@@ -545,22 +675,22 @@ def index():
             </div>
             
             <div class="debug-info">
-                <h4>디버그 정보</h4>
+                <h4>상세 디버그 정보</h4>
                 <p id="debug-info">시스템 시작...</p>
             </div>
             
             <div class="status-grid">
                 <div class="status-box">
                     <h4>카메라 상태</h4>
-                    <p>실시간 번호판 감지 + Tesseract OCR</p>
+                    <p>실시간 번호판 감지 + 강화된 OCR 디버깅</p>
                 </div>
                 <div class="status-box">
-                    <h4>거리 센서</h4>
-                    <p id="distance">측정 중...</p>
+                    <h4>거리 센서 [DUMMY]</h4>
+                    <p id="distance">시뮬레이션 중...</p>
                 </div>
                 <div class="status-box">
-                    <h4>게이트 상태</h4>
-                    <p id="servo">서보 모터 제어</p>
+                    <h4>게이트 상태 [DUMMY]</h4>
+                    <p id="servo">시뮬레이션 모드</p>
                 </div>
                 <div class="status-box">
                     <h4>MQTT 통신</h4>
@@ -569,10 +699,11 @@ def index():
             </div>
             
             <div class="controls">
-                <h3>수동 제어</h3>
+                <h3>수동 제어 (시뮬레이션)</h3>
                 <button class="btn" onclick="controlServo(0)">게이트 닫기 (0도)</button>
                 <button class="btn" onclick="controlServo(90)">게이트 열기 (90도)</button>
                 <button class="btn" onclick="controlServo(180)">최대 열기 (180도)</button>
+                <button class="btn" onclick="runOcrTest()">OCR 테스트 실행</button>
             </div>
         </div>
         
@@ -581,12 +712,25 @@ def index():
                 fetch('/control_servo/' + angle)
                     .then(response => response.json())
                     .then(data => {
-                        alert('서보 모터: ' + data.message);
+                        alert('서보 모터 (시뮬레이션): ' + data.message);
                         console.log('Servo control:', data);
                     })
                     .catch(error => {
                         console.error('Servo control error:', error);
                         alert('서보 제어 오류: ' + error);
+                    });
+            }
+            
+            function runOcrTest() {
+                fetch('/test_ocr')
+                    .then(response => response.json())
+                    .then(data => {
+                        alert('OCR 테스트 결과: ' + (data.success ? data.result : '실패'));
+                        console.log('OCR test:', data);
+                    })
+                    .catch(error => {
+                        console.error('OCR test error:', error);
+                        alert('OCR 테스트 오류: ' + error);
                     });
             }
             
@@ -601,8 +745,8 @@ def index():
                     .then(data => {
                         console.log('Status update:', data);
                         
-                        document.getElementById('distance').textContent = data.distance + 'cm';
-                        document.getElementById('servo').textContent = '각도: ' + data.servo_angle + '도';
+                        document.getElementById('distance').textContent = data.distance + 'cm (시뮬레이션)';
+                        document.getElementById('servo').textContent = '각도: ' + data.servo_angle + '도 (시뮬레이션)';
                         
                         if (data.ocr_text && data.ocr_text !== "") {
                             document.getElementById('ocr-text').textContent = data.ocr_text;
@@ -651,21 +795,40 @@ def status():
 
 @app.route('/control_servo/<int:angle>')
 def manual_servo_control(angle):
-    """Manual servo control endpoint"""
+    """Manual servo control endpoint (simulation)"""
     if 0 <= angle <= 180:
         control_servo_motor(angle)
-        return {'status': 'success', 'message': f'Servo moved to {angle} degrees'}
+        return {'status': 'success', 'message': f'Servo moved to {angle} degrees (simulation)'}
     else:
         return {'status': 'error', 'message': 'Angle must be between 0 and 180'}
 
+@app.route('/test_ocr')
+def test_ocr_endpoint():
+    """OCR 테스트 엔드포인트"""
+    try:
+        result = run_ocr_test()
+        if result:
+            return {'success': True, 'result': result}
+        else:
+            return {'success': False, 'result': 'OCR test failed'}
+    except Exception as e:
+        return {'success': False, 'result': f'Error: {e}'}
+
 if __name__ == '__main__':
     try:
-        logger.info("스마트 주차 시스템 시작")
-        print("스마트 주차 시스템 시작!")
+        logger.info("스마트 주차 시스템 시작 (디버그 모드)")
+        print("스마트 주차 시스템 시작 (OCR 디버그 모드)!")
         print("카메라 피드: http://localhost:5000")
         print("시스템 상태: http://localhost:5000/status")
+        print("OCR 테스트: http://localhost:5000/test_ocr")
         print("로그 파일: /tmp/parking_system.log")
+        print("서보모터와 초음파센서는 시뮬레이션으로 작동합니다.")
         
+        # OCR 기능 테스트 실행
+        print("\nStarting initial OCR functionality test...")
+        run_ocr_test()
+        
+        # 더미 센서 스레드 시작
         sensor_thread = threading.Thread(target=read_ultrasonic_sensor, daemon=True)
         sensor_thread.start()
         
@@ -679,6 +842,6 @@ if __name__ == '__main__':
             cap.release()
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
-        GPIO.cleanup()
+        # GPIO.cleanup()  # 주석처리
         logger.info("정리 완료")
         print("정리 완료")
