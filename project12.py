@@ -104,16 +104,35 @@ except Exception as e:
     logger.error(f"MQTT connection failed: {e}")
     print(f"MQTT connection failed: {e}")
 
-# YOLOv5 model initialization
+# YOLOv5 model initialization with fallback
 logger.info("YOLOv5 model initialization started...")
 print("YOLOv5 model loading...")
 
 device = select_device('0' if torch.cuda.is_available() else 'cpu')
-model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
+
+try:
+    # 커스텀 모델 시도
+    model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
+    print("Custom parking model loaded successfully")
+except:
+    try:
+        # 기본 YOLOv5s 모델로 대체
+        model = DetectMultiBackend('yolov5s.pt', device=device)
+        print("Using default YOLOv5s model")
+    except:
+        print("Failed to load any YOLOv5 model")
+        raise
+
 stride, names = model.stride, model.names
 
 logger.info(f"YOLOv5 model loaded successfully. Classes: {names}")
 print(f"YOLOv5 model loaded successfully. Detection classes: {names}")
+
+# 모델 클래스 정보 출력
+print(f"Available classes in model: {names}")
+print(f"Model classes type: {type(names)}")
+for i, name in enumerate(names):
+    print(f"Class {i}: '{name}'")
 
 # Tesseract 설치 확인 및 디버깅
 def check_tesseract_installation():
@@ -170,6 +189,11 @@ try:
         camera_available = True
         logger.info("Webcam initialization successful")
         print("Webcam initialization successful")
+        
+        # 실제 설정값 확인
+        actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        print(f"Actual webcam resolution: {actual_width}x{actual_height}")
     else:
         camera_available = False
         logger.error("Webcam initialization failed")
@@ -459,7 +483,7 @@ def read_ultrasonic_sensor():
             sleep(1)
 
 def detect_objects(frame):
-    """YOLOv5 object detection function with enhanced Tesseract OCR debugging"""
+    """YOLOv5 object detection function with enhanced debugging"""
     global latest_ocr_text
     
     try:
@@ -486,7 +510,17 @@ def detect_objects(frame):
         # Process detections
         if pred is not None:
             for *xyxy, conf, cls in pred:
-                label = f'{names[int(cls)]} {conf:.2f}'
+                # 여기까지는 정상 작동
+                logger.info(f"Object detected: {names[int(cls)]} (confidence: {conf:.2f})")
+                print(f"Detected: {names[int(cls)]} (confidence: {conf:.2f})")
+                
+                # 디버깅 정보 추가
+                class_name = names[int(cls)]
+                print(f"DEBUG: Processing class '{class_name}'")
+                print(f"DEBUG: Class name type: {type(class_name)}")
+                print(f"DEBUG: Class name lower: '{class_name.lower()}'")
+                
+                label = f'{class_name} {conf:.2f}'
                 xyxy = list(map(int, xyxy))
                 
                 # Scale coordinates back to original frame size
@@ -495,51 +529,120 @@ def detect_objects(frame):
                 xyxy[2] = int(xyxy[2] * frame.shape[1] / 320)
                 xyxy[3] = int(xyxy[3] * frame.shape[0] / 320)
                 
-                logger.info(f"Object detected: {names[int(cls)]} (confidence: {conf:.2f})")
-                print(f"Detected: {names[int(cls)]} (confidence: {conf:.2f})")
+                print(f"DEBUG: Scaled coordinates: {xyxy}")
                 
-                # 번호판 감지 시 강화된 Tesseract OCR 수행
-                if 'license' in names[int(cls)].lower() or 'plate' in names[int(cls)].lower():
+                # 번호판 감지 조건 - 더 넓은 조건으로 수정
+                print(f"DEBUG: Checking license plate conditions...")
+                
+                # 조건을 하나씩 확인
+                condition1 = 'license' in class_name.lower()
+                condition2 = 'plate' in class_name.lower()
+                condition3 = 'number' in class_name.lower()
+                condition4 = class_name.lower() == 'plate'
+                condition5 = class_name.lower() == 'license'
+                condition6 = 'car' in class_name.lower()
+                condition7 = 'vehicle' in class_name.lower()
+                
+                print(f"DEBUG: 'license' in name: {condition1}")
+                print(f"DEBUG: 'plate' in name: {condition2}")
+                print(f"DEBUG: 'number' in name: {condition3}")
+                print(f"DEBUG: name == 'plate': {condition4}")
+                print(f"DEBUG: name == 'license': {condition5}")
+                print(f"DEBUG: 'car' in name: {condition6}")
+                print(f"DEBUG: 'vehicle' in name: {condition7}")
+                
+                # 모든 가능한 번호판 관련 클래스명 확인
+                license_plate_keywords = ['license', 'plate', 'number', 'car', 'vehicle']
+                is_license_plate = any(keyword in class_name.lower() for keyword in license_plate_keywords)
+                
+                print(f"DEBUG: Is license plate: {is_license_plate}")
+                
+                if is_license_plate:
+                    print(f"SUCCESS: License plate condition matched for '{class_name}'!")
                     logger.info("License plate detected - Enhanced Tesseract OCR started")
                     print("License plate detected! Enhanced Tesseract OCR started...")
                     
                     # 번호판 영역 잘라내기
                     x1, y1, x2, y2 = xyxy
                     
+                    print(f"DEBUG: Original coordinates - x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2}")
+                    print(f"DEBUG: Frame shape: {frame.shape}")
+                    
                     # 경계 확인 및 여유 공간 추가
-                    margin = 10  # 여유 공간 증가
+                    margin = 10
                     x1 = max(0, x1 - margin)
                     y1 = max(0, y1 - margin)
                     x2 = min(frame.shape[1], x2 + margin)
                     y2 = min(frame.shape[0], y2 + margin)
                     
-                    if x2 > x1 and y2 > y1:  # 유효한 영역인지 확인
-                        license_plate_crop = frame[y1:y2, x1:x2]
+                    print(f"DEBUG: Adjusted coordinates - x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2}")
+                    
+                    # 유효한 영역인지 확인
+                    if x2 > x1 and y2 > y1 and (x2-x1) >= 30 and (y2-y1) >= 15:
+                        print(f"DEBUG: Valid crop area: {x2-x1}x{y2-y1}")
                         
-                        # 강화된 Tesseract OCR 텍스트 추출
-                        ocr_text = extract_text_from_license_plate(license_plate_crop)
+                        try:
+                            license_plate_crop = frame[y1:y2, x1:x2]
+                            print(f"DEBUG: Cropped image shape: {license_plate_crop.shape}")
+                            
+                            # 디버깅용 이미지 저장
+                            timestamp = int(time())
+                            debug_path = f'/tmp/license_detected_{timestamp}.jpg'
+                            cv2.imwrite(debug_path, license_plate_crop)
+                            print(f"DEBUG: Cropped image saved to {debug_path}")
+                            
+                            # OCR 실행
+                            print("DEBUG: Calling OCR function...")
+                            ocr_text = extract_text_from_license_plate(license_plate_crop)
+                            print(f"DEBUG: OCR function returned: '{ocr_text}'")
+                            
+                            if ocr_text:
+                                latest_ocr_text = ocr_text
+                                label = f'{class_name} {conf:.2f} [{ocr_text}]'
+                                license_plates_detected.append(f"{class_name} - OCR: {ocr_text}")
+                                
+                                # MQTT로 OCR 결과 전송
+                                safe_mqtt_publish(TOPIC_OCR, f"License Plate: {ocr_text}")
+                                logger.info(f"Enhanced Tesseract OCR successful: {ocr_text}")
+                                print(f"Enhanced Tesseract OCR successful: {ocr_text}")
+                                
+                            else:
+                                license_plates_detected.append(label)
+                                logger.warning("Enhanced Tesseract OCR failed")
+                                print("Enhanced Tesseract OCR failed")
+                                
+                        except Exception as crop_error:
+                            print(f"DEBUG: Error during cropping: {crop_error}")
+                            logger.error(f"Cropping error: {crop_error}")
+                            
+                    else:
+                        print(f"DEBUG: Invalid crop area - width:{x2-x1}, height:{y2-y1}")
                         
-                        if ocr_text:
-                            latest_ocr_text = ocr_text
-                            label = f'{names[int(cls)]} {conf:.2f} [{ocr_text}]'
-                            license_plates_detected.append(f"{names[int(cls)]} - OCR: {ocr_text}")
-                            
-                            # MQTT로 OCR 결과 전송
-                            safe_mqtt_publish(TOPIC_OCR, f"License Plate: {ocr_text}")
-                            logger.info(f"Enhanced Tesseract OCR successful: {ocr_text}")
-                            print(f"Enhanced Tesseract OCR successful: {ocr_text}")
-                            
-                        else:
-                            license_plates_detected.append(label)
-                            logger.warning("Enhanced Tesseract OCR failed")
-                            print("Enhanced Tesseract OCR failed")
+                else:
+                    print(f"DEBUG: '{class_name}' is not a license plate")
                 
+                # 감지된 모든 객체를 detections에 추가
                 detections.append({
                     'bbox': xyxy,
                     'label': label,
-                    'class': names[int(cls)],
+                    'class': class_name,
                     'confidence': float(conf)
                 })
+                
+                print("DEBUG: Detection processing completed for this object\n")
+        
+        # 강제 OCR 테스트 (매 60프레임마다)
+        frame_count = getattr(detect_objects, 'frame_count', 0)
+        frame_count += 1
+        detect_objects.frame_count = frame_count
+        
+        if frame_count % 60 == 0:
+            print("=== FORCED OCR TEST ===")
+            h, w = frame.shape[:2]
+            center_crop = frame[h//3:2*h//3, w//4:3*w//4]
+            test_result = extract_text_from_license_plate(center_crop)
+            print(f"Forced OCR result: {test_result}")
+            print("=== END FORCED OCR TEST ===\n")
         
         # Send MQTT message if license plate detected
         if license_plates_detected:
@@ -641,7 +744,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Smart Parking System - OCR Debug Mode</title>
+        <title>Smart Parking System - Enhanced Debug Mode</title>
         <style>
             body { font-family: Arial, sans-serif; text-align: center; background-color: #f5f5f5; }
             .container { max-width: 1000px; margin: 0 auto; padding: 20px; background-color: white; border-radius: 10px; }
@@ -657,12 +760,13 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>스마트 주차 관리 시스템 (OCR 디버그 모드)</h1>
+            <h1>스마트 주차 관리 시스템 (강화 디버그 모드)</h1>
             
             <div class="debug-mode">
-                <h4>디버그 모드 활성화</h4>
+                <h4>강화 디버그 모드 활성화</h4>
                 <p>서보모터와 초음파센서는 시뮬레이션으로 작동합니다.</p>
-                <p>Tesseract OCR 상세 디버깅이 활성화되었습니다.</p>
+                <p>YOLOv5 감지 과정과 Tesseract OCR 상세 디버깅이 활성화되었습니다.</p>
+                <p>매 60프레임마다 강제 OCR 테스트가 실행됩니다.</p>
             </div>
             
             <div class="video-container">
@@ -816,8 +920,8 @@ def test_ocr_endpoint():
 
 if __name__ == '__main__':
     try:
-        logger.info("스마트 주차 시스템 시작 (디버그 모드)")
-        print("스마트 주차 시스템 시작 (OCR 디버그 모드)!")
+        logger.info("스마트 주차 시스템 시작 (강화 디버그 모드)")
+        print("스마트 주차 시스템 시작 (강화 디버그 모드)!")
         print("카메라 피드: http://localhost:5000")
         print("시스템 상태: http://localhost:5000/status")
         print("OCR 테스트: http://localhost:5000/test_ocr")
