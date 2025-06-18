@@ -38,46 +38,34 @@ def debug_print(category, message):
         print(f"[{timestamp}] [{category}] {message}")
 
 # 시스템 인코딩 설정
-try:
-    if sys.stdout.encoding != 'utf-8':
-        sys.stdout.reconfigure(encoding='utf-8')
-    debug_print('SYSTEM', "System encoding set to UTF-8")
-except Exception as e:
-    debug_print('SYSTEM', f"Encoding setup failed: {e}")
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
+debug_print('SYSTEM', "System encoding set to UTF-8")
 
 # 로깅 설정
-try:
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('/tmp/parking_system.log', encoding='utf-8')
-        ]
-    )
-    logger = logging.getLogger(__name__)
-    debug_print('SYSTEM', "Logging system initialized")
-except Exception as e:
-    debug_print('SYSTEM', f"Logging setup failed: {e}")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/tmp/parking_system.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
+debug_print('SYSTEM', "Logging system initialized")
 
 # YOLOv5 setup
-try:
-    sys.path.append('./yolov5')
-    from models.common import DetectMultiBackend
-    from utils.general import non_max_suppression
-    from utils.torch_utils import select_device
-    debug_print('SYSTEM', "YOLOv5 modules imported successfully")
-except Exception as e:
-    debug_print('SYSTEM', f"YOLOv5 import failed: {e}")
-    print("YOLOv5 모듈을 찾을 수 없습니다. yolov5 폴더가 있는지 확인하세요.")
+sys.path.append('./yolov5')
+from models.common import DetectMultiBackend
+from utils.general import non_max_suppression
+from utils.torch_utils import select_device
+
+debug_print('SYSTEM', "YOLOv5 modules imported")
 
 # Flask app initialization
-try:
-    app = Flask(__name__)
-    debug_print('SYSTEM', "Flask app initialized")
-except Exception as e:
-    debug_print('SYSTEM', f"Flask initialization failed: {e}")
-    print("Flask 설치가 필요합니다: pip install flask")
+app = Flask(__name__)
+debug_print('SYSTEM', "Flask app initialized")
 
 # HiveMQ Cloud MQTT setup
 HIVEMQ_URL = '6930cfddf53544a49b88c300d312a4f7.s1.eu.hivemq.cloud'
@@ -85,11 +73,15 @@ HIVEMQ_PORT = 8883
 HIVEMQ_USERNAME = 'hsjpi'
 HIVEMQ_PASSWORD = 'hseojin0939PI'
 
-# MQTT Topics
+# MQTT Topics - 입출차 구분
 TOPIC_ENTRY = 'parking/entry'
 TOPIC_EXIT = 'parking/exit'
 TOPIC_PAYMENT = 'parking/payment'
 TOPIC_OCR = 'parking/ocr'
+TOPIC_LICENSE = 'parking/license'
+TOPIC_STATUS = 'parking/status'
+TOPIC_SENSOR = 'parking/sensor'
+TOPIC_SERVO = 'parking/servo'
 
 debug_print('MQTT', f"MQTT broker: {HIVEMQ_URL}:{HIVEMQ_PORT}")
 
@@ -117,15 +109,10 @@ try:
     
 except Exception as e:
     debug_print('SYSTEM', f"GPIO setup failed: {e}")
-    print("GPIO 설정 실패. 라즈베리파이에서 실행하고 있는지 확인하세요.")
 
 # MQTT Client 생성
-try:
-    mqtt_client = mqtt.Client(CallbackAPIVersion.VERSION1)
-    debug_print('MQTT', "MQTT client created with VERSION1")
-except Exception as e:
-    debug_print('MQTT', f"MQTT client creation failed: {e}")
-    print("paho-mqtt 설치가 필요합니다: pip install paho-mqtt")
+mqtt_client = mqtt.Client(CallbackAPIVersion.VERSION1)
+debug_print('MQTT', "MQTT client created with VERSION1")
 
 def safe_mqtt_publish(topic, message):
     try:
@@ -144,30 +131,42 @@ def safe_mqtt_publish(topic, message):
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         debug_print('MQTT', "HiveMQ Cloud connection successful")
-        print("HiveMQ Cloud MQTT connected successfully!")
+        logger.info("HiveMQ Cloud MQTT connected successfully!")
+        print("HiveMQ Cloud MQTT connection successful!")
         
-        # 출차 정보 수신을 위한 구독
-        client.subscribe(TOPIC_EXIT)
-        client.subscribe(TOPIC_PAYMENT)
-        debug_print('MQTT', f"Subscribed to {TOPIC_EXIT} and {TOPIC_PAYMENT}")
+        # 토픽 구독
+        client.subscribe(f"{TOPIC_STATUS}/control")
+        client.subscribe(f"{TOPIC_SERVO}/control")
+        debug_print('MQTT', "Subscribed to control topics")
+        print("Subscribed to control topics")
+        
     else:
         debug_print('MQTT', f"Connection failed with code: {rc}")
+        logger.error(f"HiveMQ Cloud MQTT connection failed with code {rc}")
         print(f"HiveMQ Cloud MQTT connection failed: {rc}")
 
 def on_message(client, userdata, msg):
     try:
         topic = msg.topic
         message = msg.payload.decode('utf-8')
-        if topic in [TOPIC_EXIT, TOPIC_PAYMENT]:
-            debug_print('MQTT', f"Received from {topic}: {message}")
-            print(f"Received: {topic} -> {message}")
+        debug_print('MQTT', f"Received from {topic}: {message}")
+        logger.info(f"MQTT received from {topic}: {message}")
+        print(f"MQTT received: {topic} -> {message}")
     except Exception as e:
         debug_print('MQTT', f"Message handling error: {e}")
+        logger.error(f"MQTT message handling error: {e}")
+
+def on_disconnect(client, userdata, rc):
+    debug_print('MQTT', f"HiveMQ Cloud disconnected with code: {rc}")
+    logger.warning(f"HiveMQ Cloud MQTT disconnected with code {rc}")
+    print(f"HiveMQ Cloud MQTT disconnected: {rc}")
 
 # MQTT 클라이언트 설정
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
+mqtt_client.on_disconnect = on_disconnect
 
+# HiveMQ Cloud 인증 및 TLS 설정
 mqtt_client.username_pw_set(HIVEMQ_USERNAME, HIVEMQ_PASSWORD)
 mqtt_client.tls_set(
     ca_certs=None, 
@@ -183,50 +182,51 @@ try:
     mqtt_client.connect(HIVEMQ_URL, HIVEMQ_PORT, 60)
     mqtt_client.loop_start()
     debug_print('MQTT', "MQTT client loop started")
+    logger.info("HiveMQ Cloud MQTT client started")
     print("HiveMQ Cloud MQTT client started")
 except Exception as e:
     debug_print('MQTT', f"Connection failed: {e}")
+    logger.error(f"HiveMQ Cloud MQTT connection failed: {e}")
     print(f"HiveMQ Cloud MQTT connection failed: {e}")
 
 # YOLOv5 model initialization
+debug_print('YOLO', "Starting YOLOv5 model initialization...")
+logger.info("YOLOv5 model initialization started...")
+print("YOLOv5 model loading...")
+
+device = select_device('0' if torch.cuda.is_available() else 'cpu')
+debug_print('YOLO', f"Selected device: {device}")
+
 try:
-    debug_print('YOLO', "Starting YOLOv5 model initialization...")
-    print("YOLOv5 model loading...")
-
-    device = select_device('0' if torch.cuda.is_available() else 'cpu')
-    debug_print('YOLO', f"Selected device: {device}")
-
+    debug_print('YOLO', "Trying to load custom parking model...")
+    model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
+    debug_print('YOLO', "Custom parking model loaded successfully")
+    print("Custom parking model loaded successfully")
+except:
     try:
-        debug_print('YOLO', "Trying to load custom parking model...")
-        model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
-        debug_print('YOLO', "Custom parking model loaded successfully")
-        print("Custom parking model loaded successfully")
+        debug_print('YOLO', "Custom model failed, trying default YOLOv5s...")
+        model = DetectMultiBackend('yolov5s.pt', device=device)
+        debug_print('YOLO', "Default YOLOv5s model loaded")
+        print("Using default YOLOv5s model")
     except:
-        try:
-            debug_print('YOLO', "Custom model failed, trying default YOLOv5s...")
-            model = DetectMultiBackend('yolov5s.pt', device=device)
-            debug_print('YOLO', "Default YOLOv5s model loaded")
-            print("Using default YOLOv5s model")
-        except Exception as e:
-            debug_print('YOLO', f"All model loading failed: {e}")
-            print("Failed to load any YOLOv5 model")
-            raise
+        debug_print('YOLO', "All model loading failed")
+        print("Failed to load any YOLOv5 model")
+        raise
 
-    stride, names = model.stride, model.names
-    debug_print('YOLO', f"Model stride: {stride}")
-    debug_print('YOLO', f"Detection classes: {names}")
-    print(f"YOLOv5 model loaded successfully. Detection classes: {names}")
-    
-except Exception as e:
-    debug_print('YOLO', f"YOLOv5 initialization failed: {e}")
-    print("YOLOv5 초기화 실패. 모델 파일을 확인하세요.")
+stride, names = model.stride, model.names
+debug_print('YOLO', f"Model stride: {stride}")
+debug_print('YOLO', f"Detection classes: {names}")
+logger.info(f"YOLOv5 model loaded successfully. Classes: {names}")
+print(f"YOLOv5 model loaded successfully. Detection classes: {names}")
 
 # EasyOCR 초기화
 def initialize_easyocr():
+    """EasyOCR 초기화 - 한국어 우선"""
     try:
         debug_print('OCR', "Starting EasyOCR initialization...")
         print("EasyOCR initialization started...")
         
+        # 한국어 + 영어 모델 시도
         try:
             debug_print('OCR', "Attempting Korean + English model...")
             reader = easyocr.Reader(['ko', 'en'])
@@ -237,65 +237,53 @@ def initialize_easyocr():
             debug_print('OCR', f"Korean model failed: {e}")
             print(f"Korean model failed, trying English only: {e}")
             
+            # 영어만 모델로 폴백
             debug_print('OCR', "Attempting English only model...")
             reader = easyocr.Reader(['en'])
             debug_print('OCR', "English only model loaded successfully")
             print("EasyOCR initialized with English only")
             return reader, False
+            
     except Exception as e:
         debug_print('OCR', f"EasyOCR initialization completely failed: {e}")
         print(f"EasyOCR initialization failed: {e}")
-        print("EasyOCR 설치가 필요합니다: pip install easyocr")
+        logger.error(f"EasyOCR initialization failed: {e}")
         return None, False
 
+# EasyOCR 초기화 실행
 easyocr_reader, korean_support = initialize_easyocr()
 
-# 웹캠 초기화 (핵심 수정 부분)
-def initialize_webcam():
-    """웹캠 초기화 함수"""
+# 웹캠 초기화 (작동하는 코드 방식 사용)
+try:
     debug_print('CAMERA', "Starting webcam initialization...")
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    debug_print('CAMERA', "VideoCapture object created and resolution set")
     
-    # 여러 카메라 인덱스 시도
-    for camera_index in range(3):  # 0, 1, 2 시도
-        try:
-            debug_print('CAMERA', f"Trying camera index {camera_index}...")
-            cap = cv2.VideoCapture(camera_index)
-            
-            if cap.isOpened():
-                # 해상도 설정 시도
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                
-                # 테스트 프레임 캡처
-                ret, test_frame = cap.read()
-                if ret and test_frame is not None:
-                    debug_print('CAMERA', f"Camera {camera_index} opened successfully")
-                    
-                    # 실제 설정값 확인
-                    actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                    actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                    debug_print('CAMERA', f"Actual resolution: {actual_width}x{actual_height}")
-                    print(f"Webcam {camera_index} initialized successfully: {actual_width}x{actual_height}")
-                    
-                    return cap, True, camera_index
-                else:
-                    debug_print('CAMERA', f"Camera {camera_index} opened but cannot capture frames")
-                    cap.release()
-            else:
-                debug_print('CAMERA', f"Camera {camera_index} failed to open")
-                
-        except Exception as e:
-            debug_print('CAMERA', f"Camera {camera_index} initialization error: {e}")
-            
-    debug_print('CAMERA', "All camera indices failed")
-    print("웹캠 초기화 실패. 다음을 확인하세요:")
-    print("1. 웹캠이 USB에 제대로 연결되어 있는지")
-    print("2. lsusb 명령어로 웹캠이 인식되는지")
-    print("3. ls /dev/video* 명령어로 비디오 장치가 있는지")
-    return None, False, -1
-
-# 웹캠 초기화 실행
-cap, camera_available, camera_index = initialize_webcam()
+    if cap.isOpened():
+        camera_available = True
+        debug_print('CAMERA', "Webcam opened successfully")
+        logger.info("Webcam initialization successful")
+        print("Webcam initialization successful")
+        
+        # 실제 설정값 확인
+        actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        debug_print('CAMERA', f"Actual webcam resolution: {actual_width}x{actual_height}")
+        print(f"Actual webcam resolution: {actual_width}x{actual_height}")
+    else:
+        camera_available = False
+        debug_print('CAMERA', "Webcam failed to open")
+        logger.error("Webcam initialization failed")
+        print("Webcam initialization failed")
+        
+except Exception as e:
+    debug_print('CAMERA', f"Webcam initialization failed: {e}")
+    logger.error(f"Webcam initialization failed: {e}")
+    print(f"Webcam initialization failed: {e}")
+    camera_available = False
+    cap = None
 
 # Global variables
 latest_detections = []
@@ -304,6 +292,11 @@ latest_ocr_text = ""
 ocr_debug_info = ""
 parking_data = {}  # 입차 데이터 저장
 system_mode = "ENTRY"  # ENTRY 또는 EXIT
+
+# 더미 변수들 (작동하는 코드와 호환성 유지)
+current_distance = 0
+servo_position = 0
+parking_status = "empty"
 
 debug_print('SYSTEM', f"Global variables initialized, system mode: {system_mode}")
 
@@ -484,18 +477,22 @@ def handle_exit(plate_number):
         return None
 
 def enhanced_preprocessing_for_easyocr(image):
+    """EasyOCR에 최적화된 이미지 전처리"""
     try:
         debug_print('OCR', "Starting image preprocessing for EasyOCR")
         
+        # 그레이스케일 변환
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image.copy()
         
+        # EasyOCR에 적합한 크기로 조정 (224x128 기준)
         height, width = gray.shape
         target_width = 224
         target_height = 128
         
+        # 비율 유지하면서 크기 조정
         aspect_ratio = width / height
         if aspect_ratio > target_width / target_height:
             new_width = target_width
@@ -505,26 +502,36 @@ def enhanced_preprocessing_for_easyocr(image):
             new_width = int(target_height * aspect_ratio)
         
         resized = cv2.resize(gray, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+        
+        # 대비 향상
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
         enhanced = clahe.apply(resized)
+        
+        # 노이즈 제거
         denoised = cv2.medianBlur(enhanced, 3)
         
         debug_print('OCR', f"Preprocessing complete: {gray.shape} -> {denoised.shape}")
         return denoised
+        
     except Exception as e:
         debug_print('OCR', f"Preprocessing error: {e}")
         return image
 
 def extract_text_with_easyocr(license_plate_image):
+    """EasyOCR을 사용한 번호판 텍스트 추출 - 연속 프레임 검증"""
     global ocr_debug_info
     
     if easyocr_reader is None:
         debug_print('OCR', "EasyOCR reader not available")
+        print("EasyOCR not available")
+        ocr_debug_info = "EasyOCR not available"
         return None
     
     try:
         debug_print('OCR', "Starting EasyOCR text extraction (Korean Priority + Frame Validation)")
+        print("EasyOCR license plate extraction started (Korean Priority)")
         
+        # EasyOCR에 최적화된 전처리
         processed = enhanced_preprocessing_for_easyocr(license_plate_image)
         
         # 디버깅용 이미지 저장
@@ -533,85 +540,157 @@ def extract_text_with_easyocr(license_plate_image):
         cv2.imwrite(f'/tmp/license_processed_{timestamp}.jpg', processed)
         debug_print('OCR', f"Debug images saved: /tmp/license_*_{timestamp}.jpg")
         
+        # EasyOCR 실행
         debug_print('OCR', "Running EasyOCR readtext...")
+        print("Running EasyOCR...")
         results = easyocr_reader.readtext(processed)
-        debug_print('OCR', f"EasyOCR detected {len(results)} text regions")
         
+        debug_print('OCR', f"EasyOCR detected {len(results)} text regions")
+        print(f"EasyOCR detected {len(results)} text regions")
+        
+        # 결과 처리 - 한국어 우선
         korean_results = []
         english_results = []
         
         for i, (bbox, text, confidence) in enumerate(results):
             debug_print('OCR', f"Result {i+1}: '{text}' (confidence: {confidence:.2f})")
+            print(f"EasyOCR result: '{text}' (confidence: {confidence:.2f})")
             
-            if confidence > 0.5:
+            if confidence > 0.5:  # 신뢰도 50% 이상
                 text_clean = text.replace(' ', '').replace('\n', '').replace('\t', '')
                 
+                # 한국어 패턴 우선 확인
                 korean_patterns = [
-                    r'^[0-9]{2,3}[가-힣][0-9]{4}$',
-                    r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',
-                    r'^[0-9]{2}[가-힣][0-9]{4}$'
+                    r'^[0-9]{2,3}[가-힣][0-9]{4}$',  # 12가3456
+                    r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',  # 서울12가3456
+                    r'^[0-9]{2}[가-힣][0-9]{4}$'   # 12가3456
                 ]
                 
+                # 한국어 패턴 매칭
                 for pattern in korean_patterns:
                     if re.match(pattern, text_clean):
                         debug_print('OCR', f"Korean pattern matched: {text_clean}")
+                        print(f"Korean pattern matched: {text_clean}")
                         korean_results.append((text_clean, confidence))
                         break
                 else:
+                    # 한글이 포함된 경우
                     if re.search(r'[가-힣]', text_clean):
                         debug_print('OCR', f"Korean characters detected: {text_clean}")
+                        print(f"Korean characters detected: {text_clean}")
                         korean_results.append((text_clean, confidence))
+                    # 영문+숫자 조합
                     elif len(text_clean) >= 4 and re.match(r'^[A-Z0-9]+$', text_clean):
                         debug_print('OCR', f"English pattern detected: {text_clean}")
+                        print(f"English pattern detected: {text_clean}")
                         english_results.append((text_clean, confidence))
         
+        # 결과 우선순위: 한국어 > 영어
         current_result = None
         current_confidence = 0
         
         if korean_results:
+            # 신뢰도가 가장 높은 한국어 결과 선택
             best_korean = max(korean_results, key=lambda x: x[1])
             current_result = best_korean[0]
             current_confidence = best_korean[1]
             debug_print('OCR', f"Selected Korean result: {current_result} (confidence: {current_confidence:.2f})")
+            print(f"Current frame result (Korean): {current_result} (confidence: {current_confidence:.2f})")
+            
         elif english_results:
+            # 신뢰도가 가장 높은 영어 결과 선택
             best_english = max(english_results, key=lambda x: x[1])
             current_result = best_english[0]
             current_confidence = best_english[1]
             debug_print('OCR', f"Selected English result: {current_result} (confidence: {current_confidence:.2f})")
+            print(f"Current frame result (English): {current_result} (confidence: {current_confidence:.2f})")
         
+        # 연속 프레임 검증 적용
         if current_result:
             validated_result, validated_confidence, is_approved = validate_ocr_result(current_result, current_confidence)
             
             if is_approved:
-                ocr_debug_info = f"Validated: {validated_result}"
+                ocr_debug_info = f"Validated Success: {validated_result} ({validated_confidence:.2f})"
                 debug_print('OCR', f"✅ OCR APPROVED: {validated_result}")
+                print(f"Final result (Korean): {validated_result} (confidence: {validated_confidence:.2f})")
                 return validated_result
             else:
-                ocr_debug_info = "Validation pending..."
+                ocr_debug_info = f"Validation Pending: {validated_result or 'Collecting...'}"
                 debug_print('OCR', "⏳ OCR validation pending")
-                return None
+                return None  # 아직 승인되지 않음
+        
+        # 패턴 매칭 실패 시 가장 긴 텍스트 선택
+        all_texts = [(text, conf) for (bbox, text, conf) in results if conf > 0.3]
+        if all_texts:
+            longest_text = max(all_texts, key=lambda x: len(x[0].strip()))
+            if len(longest_text[0].strip()) >= 3:
+                fallback_result = longest_text[0].strip().replace(' ', '')
+                debug_print('OCR', f"Fallback result: {fallback_result} (confidence: {longest_text[1]:.2f})")
+                print(f"Fallback result: {fallback_result} (confidence: {longest_text[1]:.2f})")
+                
+                # 폴백 결과도 연속 프레임 검증 적용
+                validated_result, validated_confidence, is_approved = validate_ocr_result(fallback_result, longest_text[1])
+                
+                if is_approved:
+                    ocr_debug_info = f"Fallback Validated: {validated_result} ({validated_confidence:.2f})"
+                    debug_print('OCR', f"✅ Fallback OCR APPROVED: {validated_result}")
+                    return validated_result
+                else:
+                    ocr_debug_info = f"Fallback Pending: {validated_result or 'Collecting...'}"
+                    debug_print('OCR', "⏳ Fallback OCR validation pending")
+                    return None
         
         debug_print('OCR', "No valid OCR results found")
+        print("EasyOCR: No valid text detected")
+        ocr_debug_info = "EasyOCR: No valid text"
         return None
         
     except Exception as e:
         debug_print('OCR', f"EasyOCR extraction error: {e}")
+        print(f"EasyOCR error: {e}")
+        logger.error(f"EasyOCR error: {e}")
+        ocr_debug_info = f"EasyOCR error: {e}"
         return None
+
+def control_servo_motor(angle):
+    """서보모터 제어 (더미 + 실제 통합)"""
+    global servo_position
+    servo_position = angle
+    safe_mqtt_publish(TOPIC_SERVO, f"Servo angle: {angle}")
+    
+    # 실제 서보모터 제어
+    set_servo_angle(angle)
+    
+    debug_print('SERVO', f"Servo motor: {angle} degrees")
+    print(f"Servo motor: {angle} degrees")
 
 def read_ultrasonic_sensor():
     """실제 초음파센서 모니터링"""
+    global current_distance, parking_status
+    
     debug_print('SENSOR', "Starting ultrasonic sensor monitoring thread")
     print("Ultrasonic sensor monitoring started")
     
     while True:
         try:
-            distance = measure_distance()
+            distance_cm = measure_distance()
+            current_distance = distance_cm
             
             # 10cm 이내로 접근 시 YOLOv5 활성화 트리거
-            if distance <= DISTANCE_THRESHOLD:
-                debug_print('SENSOR', f"🚗 Vehicle detected at {distance}cm (threshold: {DISTANCE_THRESHOLD}cm)")
-                print(f"Vehicle detected at {distance}cm - Activating license plate detection")
+            if distance_cm <= DISTANCE_THRESHOLD:
+                new_status = "occupied"
+                if parking_status != new_status:
+                    debug_print('SENSOR', f"🚗 Vehicle detected at {distance_cm}cm (threshold: {DISTANCE_THRESHOLD}cm)")
+                    print(f"Vehicle detected at {distance_cm}cm - Activating license plate detection")
+                    safe_mqtt_publish(TOPIC_STATUS, "vehicle_detected")
+            else:
+                new_status = "empty"
+                if parking_status != new_status:
+                    debug_print('SENSOR', f"Vehicle left - distance: {distance_cm}cm")
+                    safe_mqtt_publish(TOPIC_STATUS, "vehicle_left")
             
+            parking_status = new_status
+            safe_mqtt_publish(TOPIC_SENSOR, f"Distance: {distance_cm:.2f}cm")
             sleep(0.5)  # 0.5초마다 거리 측정
             
         except Exception as e:
@@ -619,6 +698,7 @@ def read_ultrasonic_sensor():
             sleep(1)
 
 def detect_objects(frame):
+    """YOLOv5 객체 감지 + EasyOCR 번호판 인식 (연속 프레임 검증)"""
     global latest_ocr_text
     
     try:
@@ -641,23 +721,30 @@ def detect_objects(frame):
         if img_tensor.ndimension() == 3:
             img_tensor = img_tensor.unsqueeze(0)
 
+        # Inference
         debug_print('YOLO', "Running YOLOv5 inference...")
         pred = model(img_tensor)
         pred = non_max_suppression(pred, conf_thres=0.7, iou_thres=0.45)[0]
         
         detections = []
+        license_plates_detected = []
+        
+        # 새로운 프레임에서 번호판이 감지되지 않으면 버퍼 초기화
         plate_detected_in_frame = False
         
         debug_print('YOLO', f"YOLOv5 detected {len(pred) if pred is not None else 0} objects")
         
+        # Process detections - plat만 처리
         if pred is not None:
             for i, (*xyxy, conf, cls) in enumerate(pred):
                 class_name = names[int(cls)]
                 debug_print('YOLO', f"Detection {i+1}: {class_name} (confidence: {conf:.2f})")
                 
+                # plat 클래스만 처리
                 if class_name.lower() == 'plat':
                     plate_detected_in_frame = True
                     debug_print('YOLO', f"✅ License plate detected: {class_name} (confidence: {conf:.2f})")
+                    print(f"License plate detected: {class_name} (confidence: {conf:.2f})")
                     
                     label = f'{class_name} {conf:.2f}'
                     xyxy = list(map(int, xyxy))
@@ -670,7 +757,10 @@ def detect_objects(frame):
                     
                     debug_print('YOLO', f"Scaled coordinates: {xyxy}")
                     
+                    # 번호판 영역 잘라내기
                     x1, y1, x2, y2 = xyxy
+                    
+                    # 경계 확인 및 여유 공간 추가
                     margin = 15
                     x1 = max(0, x1 - margin)
                     y1 = max(0, y1 - margin)
@@ -679,6 +769,7 @@ def detect_objects(frame):
                     
                     debug_print('YOLO', f"Adjusted coordinates with margin: [{x1}, {y1}, {x2}, {y2}]")
                     
+                    # 유효한 영역인지 확인
                     if x2 > x1 and y2 > y1 and (x2-x1) >= 50 and (y2-y1) >= 20:
                         debug_print('YOLO', f"Valid crop area: {x2-x1}x{y2-y1}")
                         
@@ -686,15 +777,21 @@ def detect_objects(frame):
                             license_plate_crop = frame[y1:y2, x1:x2]
                             debug_print('OCR', f"License plate cropped: {license_plate_crop.shape}")
                             
+                            # 연속 프레임 검증이 포함된 EasyOCR 실행
                             debug_print('OCR', "Starting EasyOCR with Frame Validation...")
+                            print("Starting EasyOCR (Korean Priority)...")
                             ocr_text = extract_text_with_easyocr(license_plate_crop)
                             
                             if ocr_text:
                                 latest_ocr_text = ocr_text
                                 label = f'{class_name} {conf:.2f} [{ocr_text}]'
+                                license_plates_detected.append(f"{class_name} - EasyOCR: {ocr_text}")
                                 
+                                # HiveMQ Cloud MQTT로 OCR 결과 전송
+                                safe_mqtt_publish(TOPIC_OCR, f"License Plate: {ocr_text}")
+                                safe_mqtt_publish(TOPIC_LICENSE, f"Detected License: {ocr_text}")
                                 debug_print('PARKING', f"🎉 License Plate Detected: {ocr_text}")
-                                print(f"License Plate Detected: {ocr_text}")
+                                print(f"EasyOCR successful: {ocr_text}")
                                 
                                 # 입출차 처리
                                 if system_mode == "ENTRY":
@@ -702,13 +799,17 @@ def detect_objects(frame):
                                 elif system_mode == "EXIT":
                                     handle_exit(ocr_text)
                                 
+                                # OCR 성공 시 버퍼 초기화 (다음 차량 준비)
                                 clear_ocr_buffer()
                                 
                             else:
+                                license_plates_detected.append(label)
                                 debug_print('OCR', "OCR validation pending or failed")
+                                print("EasyOCR failed")
                                 
                         except Exception as crop_error:
                             debug_print('YOLO', f"Cropping error: {crop_error}")
+                            print(f"Cropping error: {crop_error}")
                     else:
                         debug_print('YOLO', f"Invalid crop area: {x2-x1}x{y2-y1}")
                     
@@ -719,18 +820,38 @@ def detect_objects(frame):
                         'confidence': float(conf)
                     })
         
+        # 번호판이 감지되지 않은 프레임에서는 버퍼 초기화 (새로운 차량 대기)
         if not plate_detected_in_frame and len(ocr_buffer) > 0:
             debug_print('YOLO', "No plate detected in frame - clearing OCR buffer")
+            print("🔄 No plate detected in frame - clearing buffer for new vehicle")
             clear_ocr_buffer()
+        
+        # Send MQTT message if license plate detected
+        if license_plates_detected:
+            try:
+                safe_mqtt_publish(TOPIC_STATUS, "license_plate_detected")
+                safe_mqtt_publish(TOPIC_LICENSE, f"Detected: {', '.join(license_plates_detected)}")
+                debug_print('MQTT', f"MQTT sent: {license_plates_detected}")
+                print(f"HiveMQ Cloud MQTT sent: {license_plates_detected}")
+                
+                # Open gate for 5 seconds
+                control_servo_motor(90)
+                threading.Timer(5.0, lambda: control_servo_motor(0)).start()
+                
+            except Exception as e:
+                debug_print('MQTT', f"MQTT transmission failed: {e}")
+                print(f"HiveMQ Cloud MQTT transmission failed: {e}")
         
         debug_print('YOLO', f"Object detection completed, returning {len(detections)} detections")
         return detections
         
     except Exception as e:
         debug_print('YOLO', f"Object detection error: {e}")
+        print(f"Object detection error: {e}")
         return []
 
 def generate_frames():
+    """Generate video frames for Flask streaming using webcam"""
     global latest_detections
     
     if not camera_available:
@@ -739,8 +860,6 @@ def generate_frames():
             dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(dummy_frame, "Webcam Not Available", (150, 240), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.putText(dummy_frame, "Check USB connection", (150, 280), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             ret, buffer = cv2.imencode('.jpg', dummy_frame)
             if ret:
                 frame_bytes = buffer.tobytes()
@@ -748,8 +867,8 @@ def generate_frames():
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
             sleep(0.1)
     
-    debug_print('CAMERA', f"Starting webcam frame generation (camera index: {camera_index})")
-    print(f"Smart Parking System started with webcam (index: {camera_index})")
+    debug_print('CAMERA', "Starting webcam frame generation")
+    print("Webcam + EasyOCR + Frame Validation + HiveMQ Cloud video stream started")
     
     frame_count = 0
     while True:
@@ -762,7 +881,6 @@ def generate_frames():
             ret, frame = cap.read()
             if not ret:
                 debug_print('CAMERA', "Failed to capture frame from webcam")
-                sleep(0.1)
                 continue
             
             if frame_count % 30 == 0:
@@ -782,26 +900,42 @@ def generate_frames():
                 cv2.putText(frame, label, (bbox[0], bbox[1] - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
-            # 핵심 정보만 표시
-            current_distance = measure_distance()
+            # Draw information on frame
+            current_distance_display = measure_distance()
             cv2.putText(frame, f"Mode: {system_mode}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, f"Distance: {current_distance:.1f}cm (Threshold: {DISTANCE_THRESHOLD}cm)", (10, 60), 
+            cv2.putText(frame, f"Distance: {current_distance_display:.1f}cm (Threshold: {DISTANCE_THRESHOLD}cm)", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, f"Status: {parking_status}", (10, 90), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, f"Servo: {servo_position}°", (10, 120), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
+            # OCR 결과 표시
             if latest_ocr_text:
-                cv2.putText(frame, f"Plate: {latest_ocr_text}", (10, 90), 
+                cv2.putText(frame, f"Validated OCR: {latest_ocr_text}", (10, 150), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
-            cv2.putText(frame, f"Parked: {len(parking_data)}", (10, 120), 
+            # OCR 버퍼 상태 표시
+            buffer_status = f"OCR Buffer: {len(ocr_buffer)}/5"
+            cv2.putText(frame, buffer_status, (10, 180), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            
+            cv2.putText(frame, f"Parked: {len(parking_data)}", (10, 210), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
-            # OCR 버퍼 상태
-            cv2.putText(frame, f"OCR Buffer: {len(ocr_buffer)}/5", (10, 150), 
+            # HiveMQ Cloud 연결 상태 표시
+            mqtt_status = "HiveMQ Connected" if mqtt_client.is_connected() else "HiveMQ Disconnected"
+            cv2.putText(frame, mqtt_status, (10, 390), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if mqtt_client.is_connected() else (0, 0, 255), 2)
+            
+            # EasyOCR + Frame Validation 표시
+            ocr_status = "EasyOCR+FrameVal (KO+EN)" if korean_support else "EasyOCR+FrameVal (EN)"
+            cv2.putText(frame, ocr_status, (10, 420), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
             
             # 웹캠 표시
-            cv2.putText(frame, f"USB Webcam {camera_index}", (10, 450), 
+            cv2.putText(frame, "USB Webcam", (10, 450), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
             ret, buffer = cv2.imencode('.jpg', frame)
@@ -819,7 +953,9 @@ def generate_frames():
 
 @app.route('/')
 def index():
-    camera_status = f"웹캠 {camera_index}" if camera_available else "웹캠 없음"
+    """Main page with video feed"""
+    korean_status = "한국어 + 영어" if korean_support else "영어만"
+    mqtt_status = "연결됨" if mqtt_client.is_connected() else "연결 안됨"
     
     html_template = f'''
     <!DOCTYPE html>
@@ -835,18 +971,19 @@ def index():
             .controls {{ margin: 20px 0; }}
             .btn {{ padding: 10px 20px; margin: 5px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }}
             .debug-mode {{ margin: 20px 0; padding: 15px; background-color: #fff3cd; border-radius: 8px; }}
-            .camera-error {{ background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }}
+            .hivemq-mode {{ background-color: #e8f5e9; border: 1px solid #c8e6c9; color: #2e7d32; }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>스마트 주차 관리 시스템 (웹캠 + 디버깅 모드)</h1>
             
-            <div class="debug-mode {'camera-error' if not camera_available else ''}">
-                <h4>디버깅 모드 활성화</h4>
-                <p>카메라: {camera_status} | 거리 임계값: {DISTANCE_THRESHOLD}cm | OCR: EasyOCR</p>
+            <div class="debug-mode hivemq-mode">
+                <h4>웹캠 + EasyOCR + 연속 프레임 검증 + HiveMQ Cloud</h4>
+                <p>카메라: USB 웹캠 | 거리 임계값: {DISTANCE_THRESHOLD}cm | OCR: EasyOCR ({korean_status})</p>
+                <p>검증 시스템: 연속 5프레임 분석 (신뢰도 임계값: 80%)</p>
+                <p>MQTT 브로커: HiveMQ Cloud ({mqtt_status})</p>
                 <p>모든 처리 과정이 터미널에 상세히 출력됩니다</p>
-                {'<p style="color: red;">⚠️ 웹캠이 감지되지 않았습니다. USB 연결을 확인하세요.</p>' if not camera_available else ''}
                 <button class="btn" onclick="setMode('ENTRY')">입차 모드</button>
                 <button class="btn" onclick="setMode('EXIT')">출차 모드</button>
                 <p>현재 모드: <span id="current-mode">{system_mode}</span></p>
@@ -858,7 +995,7 @@ def index():
             
             <div class="status-grid">
                 <div class="status-box">
-                    <h4>최근 인식 번호판</h4>
+                    <h4>최근 검증된 번호판</h4>
                     <p id="latest-plate">대기 중...</p>
                 </div>
                 <div class="status-box">
@@ -870,15 +1007,16 @@ def index():
                     <p id="distance">측정 중...</p>
                 </div>
                 <div class="status-box">
-                    <h4>MQTT 상태</h4>
-                    <p id="mqtt-status">연결 확인 중...</p>
+                    <h4>HiveMQ Cloud MQTT</h4>
+                    <p id="mqtt-status">{mqtt_status}</p>
                 </div>
             </div>
             
             <div class="controls">
-                <h3>디버깅 도구</h3>
-                <button class="btn" onclick="testCamera()">카메라 테스트</button>
-                <button class="btn" onclick="clearOCRBuffer()">OCR 버퍼 초기화</button>
+                <h3>수동 제어</h3>
+                <button class="btn" onclick="controlServo(0)">게이트 닫기</button>
+                <button class="btn" onclick="controlServo(90)">게이트 열기</button>
+                <button class="btn" onclick="clearBuffer()">OCR 버퍼 초기화</button>
             </div>
         </div>
         
@@ -892,15 +1030,15 @@ def index():
                     }});
             }}
             
-            function testCamera() {{
-                fetch('/test_camera')
+            function controlServo(angle) {{
+                fetch('/control_servo/' + angle)
                     .then(response => response.json())
                     .then(data => {{
-                        alert('카메라 테스트: ' + data.message);
+                        alert('서보 모터: ' + data.message);
                     }});
             }}
             
-            function clearOCRBuffer() {{
+            function clearBuffer() {{
                 fetch('/clear_ocr_buffer')
                     .then(response => response.json())
                     .then(data => {{
@@ -926,11 +1064,13 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
+    """Video streaming route"""
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/status')
 def status():
+    """API endpoint for current system status"""
     with detection_lock:
         return {
             'latest_plate': latest_ocr_text,
@@ -938,8 +1078,9 @@ def status():
             'distance': f"{measure_distance():.1f}",
             'mqtt_connected': mqtt_client.is_connected(),
             'system_mode': system_mode,
-            'camera_available': camera_available,
-            'camera_index': camera_index if camera_available else -1
+            'ocr_buffer_size': len(ocr_buffer),
+            'parking_status': parking_status,
+            'servo_angle': servo_position
         }
 
 @app.route('/set_mode/<mode>')
@@ -953,19 +1094,18 @@ def set_mode(mode):
     else:
         return {'status': 'error', 'message': 'Invalid mode'}
 
-@app.route('/test_camera')
-def test_camera():
-    if camera_available:
-        ret, frame = cap.read()
-        if ret:
-            return {'status': 'success', 'message': f'Camera {camera_index} working properly'}
-        else:
-            return {'status': 'error', 'message': f'Camera {camera_index} cannot capture frames'}
+@app.route('/control_servo/<int:angle>')
+def manual_servo_control(angle):
+    """Manual servo control endpoint"""
+    if 0 <= angle <= 180:
+        control_servo_motor(angle)
+        return {'status': 'success', 'message': f'Servo moved to {angle} degrees'}
     else:
-        return {'status': 'error', 'message': 'No camera available'}
+        return {'status': 'error', 'message': 'Angle must be between 0 and 180'}
 
 @app.route('/clear_ocr_buffer')
 def clear_ocr_buffer_endpoint():
+    """OCR 버퍼 수동 초기화 엔드포인트"""
     clear_ocr_buffer()
     return {'status': 'success', 'message': 'OCR buffer cleared successfully'}
 
@@ -980,9 +1120,7 @@ if __name__ == '__main__':
         print(f"- {DISTANCE_THRESHOLD}cm 이내 접근 시 번호판 인식 활성화")
         print(f"- 현재 모드: {system_mode}")
         print("- 상세 디버깅 모드 활성화")
-        print(f"- 카메라 상태: {'사용 가능' if camera_available else '사용 불가'}")
-        if camera_available:
-            print(f"- 사용 중인 카메라: 인덱스 {camera_index}")
+        print("- 연속 프레임 검증 시스템")
         print("웹 인터페이스: http://localhost:5000")
         debug_print('SYSTEM', "All systems initialized successfully")
         
