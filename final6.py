@@ -7,7 +7,6 @@ from time import sleep
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 import threading
-from picamera2 import Picamera2  # Picamera2로 변경
 from time import time
 import easyocr
 import re
@@ -235,31 +234,39 @@ def initialize_easyocr():
 
 easyocr_reader, korean_support = initialize_easyocr()
 
-# Picamera2 초기화
+# 웹캠 초기화 (Picamera2에서 웹캠으로 변경)
 try:
-    debug_print('CAMERA', "Starting Picamera2 initialization...")
-    picam2 = Picamera2()
-    debug_print('CAMERA', "Picamera2 object created")
+    debug_print('CAMERA', "Starting webcam initialization...")
+    cap = cv2.VideoCapture(0)
+    debug_print('CAMERA', "VideoCapture object created")
     
-    picam2.configure(picam2.create_video_configuration(main={"size": (640, 480), "format": "RGB888"}))
-    debug_print('CAMERA', "Picamera2 configured (640x480, RGB888)")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    debug_print('CAMERA', "Webcam resolution set to 640x480")
     
-    picam2.start()
-    debug_print('CAMERA', "Picamera2 started")
-    
-    sleep(2)  # 카메라 안정화 대기
-    debug_print('CAMERA', "Camera stabilization complete")
-    
-    camera_available = True
-    logger.info("Picamera2 initialization successful")
-    print("Picamera2 initialization successful")
-    
+    if cap.isOpened():
+        camera_available = True
+        debug_print('CAMERA', "Webcam opened successfully")
+        logger.info("Webcam initialization successful")
+        print("Webcam initialization successful")
+        
+        # 실제 설정값 확인
+        actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        debug_print('CAMERA', f"Actual webcam resolution: {actual_width}x{actual_height}")
+        print(f"Actual webcam resolution: {actual_width}x{actual_height}")
+    else:
+        camera_available = False
+        debug_print('CAMERA', "Webcam failed to open")
+        logger.error("Webcam initialization failed")
+        print("Webcam initialization failed")
+        
 except Exception as e:
-    debug_print('CAMERA', f"Picamera2 initialization failed: {e}")
-    logger.error(f"Picamera2 initialization failed: {e}")
-    print(f"Picamera2 initialization failed: {e}")
+    debug_print('CAMERA', f"Webcam initialization failed: {e}")
+    logger.error(f"Webcam initialization failed: {e}")
+    print(f"Webcam initialization failed: {e}")
     camera_available = False
-    picam2 = None
+    cap = None
 
 # Global variables
 latest_detections = []
@@ -701,7 +708,7 @@ def generate_frames():
         debug_print('CAMERA', "Camera not available, generating dummy frames")
         while True:
             dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(dummy_frame, "Picamera2 Not Available", (150, 240), 
+            cv2.putText(dummy_frame, "Webcam Not Available", (150, 240), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             ret, buffer = cv2.imencode('.jpg', dummy_frame)
             if ret:
@@ -710,8 +717,8 @@ def generate_frames():
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
             sleep(0.1)
     
-    debug_print('CAMERA', "Starting Picamera2 frame generation")
-    print("Smart Parking System started with Picamera2")
+    debug_print('CAMERA', "Starting webcam frame generation")
+    print("Smart Parking System started with webcam")
     
     frame_count = 0
     while True:
@@ -719,13 +726,13 @@ def generate_frames():
             frame_count += 1
             debug_print('CAMERA', f"Capturing frame {frame_count}")
             
-            # Picamera2에서 프레임 캡처
-            frame = picam2.capture_array()
-            debug_print('CAMERA', f"Frame captured: {frame.shape}")
+            # 웹캠에서 프레임 캡처
+            ret, frame = cap.read()
+            if not ret:
+                debug_print('CAMERA', "Failed to capture frame from webcam")
+                continue
             
-            # RGB에서 BGR로 변환 (OpenCV 호환성)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            debug_print('CAMERA', "Frame converted from RGB to BGR")
+            debug_print('CAMERA', f"Frame captured: {frame.shape}")
             
             detections = detect_objects(frame)
             
@@ -759,8 +766,8 @@ def generate_frames():
             cv2.putText(frame, f"OCR Buffer: {len(ocr_buffer)}/5", (10, 150), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
             
-            # Picamera2 표시
-            cv2.putText(frame, "Picamera2", (10, 450), 
+            # 웹캠 표시
+            cv2.putText(frame, "USB Webcam", (10, 450), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
             ret, buffer = cv2.imencode('.jpg', frame)
@@ -782,7 +789,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Smart Parking System - Picamera2 Debug Mode</title>
+        <title>Smart Parking System - Webcam Debug Mode</title>
         <style>
             body {{ font-family: Arial, sans-serif; text-align: center; background-color: #f5f5f5; }}
             .container {{ max-width: 1000px; margin: 0 auto; padding: 20px; background-color: white; border-radius: 10px; }}
@@ -796,11 +803,11 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>스마트 주차 관리 시스템 (Picamera2 + 디버깅 모드)</h1>
+            <h1>스마트 주차 관리 시스템 (웹캠 + 디버깅 모드)</h1>
             
             <div class="debug-mode">
                 <h4>디버깅 모드 활성화</h4>
-                <p>카메라: Picamera2 | 거리 임계값: {DISTANCE_THRESHOLD}cm | OCR: EasyOCR</p>
+                <p>카메라: USB 웹캠 | 거리 임계값: {DISTANCE_THRESHOLD}cm | OCR: EasyOCR</p>
                 <p>모든 처리 과정이 터미널에 상세히 출력됩니다</p>
                 <button class="btn" onclick="setMode('ENTRY')">입차 모드</button>
                 <button class="btn" onclick="setMode('EXIT')">출차 모드</button>
@@ -808,7 +815,7 @@ def index():
             </div>
             
             <div class="video-container">
-                <img src="{{{{ url_for('video_feed') }}}}" width="640" height="480" alt="Picamera2 Feed">
+                <img src="{{{{ url_for('video_feed') }}}}" width="640" height="480" alt="Webcam Feed">
             </div>
             
             <div class="status-grid">
@@ -887,8 +894,8 @@ def set_mode(mode):
 if __name__ == '__main__':
     try:
         debug_print('SYSTEM', "=== SMART PARKING SYSTEM STARTUP ===")
-        print("스마트 주차 시스템 시작 (Picamera2 + 디버깅 모드)!")
-        print("- Picamera2 카메라 연동")
+        print("스마트 주차 시스템 시작 (웹캠 + 디버깅 모드)!")
+        print("- USB 웹캠 연동")
         print("- 실제 GPIO 하드웨어 연동")
         print("- 입출차 관리 및 요금 계산")
         print("- HiveMQ Cloud MQTT 통신")
@@ -911,8 +918,8 @@ if __name__ == '__main__':
     finally:
         debug_print('SYSTEM', "Cleaning up resources...")
         if camera_available:
-            picam2.stop()
-            debug_print('CAMERA', "Picamera2 stopped")
+            cap.release()  # 웹캠 리소스 해제
+            debug_print('CAMERA', "Webcam released")
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
         debug_print('MQTT', "MQTT client disconnected")
