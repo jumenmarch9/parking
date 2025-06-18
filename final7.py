@@ -38,34 +38,46 @@ def debug_print(category, message):
         print(f"[{timestamp}] [{category}] {message}")
 
 # 시스템 인코딩 설정
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
-
-debug_print('SYSTEM', "System encoding set to UTF-8")
+try:
+    if sys.stdout.encoding != 'utf-8':
+        sys.stdout.reconfigure(encoding='utf-8')
+    debug_print('SYSTEM', "System encoding set to UTF-8")
+except Exception as e:
+    debug_print('SYSTEM', f"Encoding setup failed: {e}")
 
 # 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('/tmp/parking_system.log', encoding='utf-8')
-    ]
-)
-logger = logging.getLogger(__name__)
-debug_print('SYSTEM', "Logging system initialized")
+try:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('/tmp/parking_system.log', encoding='utf-8')
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    debug_print('SYSTEM', "Logging system initialized")
+except Exception as e:
+    debug_print('SYSTEM', f"Logging setup failed: {e}")
 
 # YOLOv5 setup
-sys.path.append('./yolov5')
-from models.common import DetectMultiBackend
-from utils.general import non_max_suppression
-from utils.torch_utils import select_device
-
-debug_print('SYSTEM', "YOLOv5 modules imported")
+try:
+    sys.path.append('./yolov5')
+    from models.common import DetectMultiBackend
+    from utils.general import non_max_suppression
+    from utils.torch_utils import select_device
+    debug_print('SYSTEM', "YOLOv5 modules imported successfully")
+except Exception as e:
+    debug_print('SYSTEM', f"YOLOv5 import failed: {e}")
+    print("YOLOv5 모듈을 찾을 수 없습니다. yolov5 폴더가 있는지 확인하세요.")
 
 # Flask app initialization
-app = Flask(__name__)
-debug_print('SYSTEM', "Flask app initialized")
+try:
+    app = Flask(__name__)
+    debug_print('SYSTEM', "Flask app initialized")
+except Exception as e:
+    debug_print('SYSTEM', f"Flask initialization failed: {e}")
+    print("Flask 설치가 필요합니다: pip install flask")
 
 # HiveMQ Cloud MQTT setup
 HIVEMQ_URL = '6930cfddf53544a49b88c300d312a4f7.s1.eu.hivemq.cloud'
@@ -73,7 +85,7 @@ HIVEMQ_PORT = 8883
 HIVEMQ_USERNAME = 'hsjpi'
 HIVEMQ_PASSWORD = 'hseojin0939PI'
 
-# MQTT Topics - 입출차 구분
+# MQTT Topics
 TOPIC_ENTRY = 'parking/entry'
 TOPIC_EXIT = 'parking/exit'
 TOPIC_PAYMENT = 'parking/payment'
@@ -85,7 +97,7 @@ debug_print('MQTT', f"MQTT broker: {HIVEMQ_URL}:{HIVEMQ_PORT}")
 TRIG_PIN = 17
 ECHO_PIN = 27
 SERVO_PIN = 18
-DISTANCE_THRESHOLD = 10.0  # 5cm에서 10cm로 변경
+DISTANCE_THRESHOLD = 10.0  # 10cm 거리 임계값
 
 debug_print('SYSTEM', f"GPIO pins - TRIG: {TRIG_PIN}, ECHO: {ECHO_PIN}, SERVO: {SERVO_PIN}")
 debug_print('SENSOR', f"Distance threshold: {DISTANCE_THRESHOLD}cm")
@@ -105,7 +117,7 @@ try:
     
 except Exception as e:
     debug_print('SYSTEM', f"GPIO setup failed: {e}")
-    raise
+    print("GPIO 설정 실패. 라즈베리파이에서 실행하고 있는지 확인하세요.")
 
 # MQTT Client 생성
 try:
@@ -113,7 +125,7 @@ try:
     debug_print('MQTT', "MQTT client created with VERSION1")
 except Exception as e:
     debug_print('MQTT', f"MQTT client creation failed: {e}")
-    raise
+    print("paho-mqtt 설치가 필요합니다: pip install paho-mqtt")
 
 def safe_mqtt_publish(topic, message):
     try:
@@ -128,7 +140,6 @@ def safe_mqtt_publish(topic, message):
             logger.info(f"MQTT: {topic} -> {message}")
     except Exception as e:
         debug_print('MQTT', f"Publish error to {topic}: {e}")
-        logger.error(f"MQTT publish error: {e}")
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
@@ -152,7 +163,6 @@ def on_message(client, userdata, msg):
             print(f"Received: {topic} -> {message}")
     except Exception as e:
         debug_print('MQTT', f"Message handling error: {e}")
-        logger.error(f"MQTT message handling error: {e}")
 
 # MQTT 클라이언트 설정
 mqtt_client.on_connect = on_connect
@@ -179,32 +189,37 @@ except Exception as e:
     print(f"HiveMQ Cloud MQTT connection failed: {e}")
 
 # YOLOv5 model initialization
-debug_print('YOLO', "Starting YOLOv5 model initialization...")
-print("YOLOv5 model loading...")
-
-device = select_device('0' if torch.cuda.is_available() else 'cpu')
-debug_print('YOLO', f"Selected device: {device}")
-
 try:
-    debug_print('YOLO', "Trying to load custom parking model...")
-    model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
-    debug_print('YOLO', "Custom parking model loaded successfully")
-    print("Custom parking model loaded successfully")
-except:
-    try:
-        debug_print('YOLO', "Custom model failed, trying default YOLOv5s...")
-        model = DetectMultiBackend('yolov5s.pt', device=device)
-        debug_print('YOLO', "Default YOLOv5s model loaded")
-        print("Using default YOLOv5s model")
-    except Exception as e:
-        debug_print('YOLO', f"All model loading failed: {e}")
-        print("Failed to load any YOLOv5 model")
-        raise
+    debug_print('YOLO', "Starting YOLOv5 model initialization...")
+    print("YOLOv5 model loading...")
 
-stride, names = model.stride, model.names
-debug_print('YOLO', f"Model stride: {stride}")
-debug_print('YOLO', f"Detection classes: {names}")
-print(f"YOLOv5 model loaded successfully. Detection classes: {names}")
+    device = select_device('0' if torch.cuda.is_available() else 'cpu')
+    debug_print('YOLO', f"Selected device: {device}")
+
+    try:
+        debug_print('YOLO', "Trying to load custom parking model...")
+        model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
+        debug_print('YOLO', "Custom parking model loaded successfully")
+        print("Custom parking model loaded successfully")
+    except:
+        try:
+            debug_print('YOLO', "Custom model failed, trying default YOLOv5s...")
+            model = DetectMultiBackend('yolov5s.pt', device=device)
+            debug_print('YOLO', "Default YOLOv5s model loaded")
+            print("Using default YOLOv5s model")
+        except Exception as e:
+            debug_print('YOLO', f"All model loading failed: {e}")
+            print("Failed to load any YOLOv5 model")
+            raise
+
+    stride, names = model.stride, model.names
+    debug_print('YOLO', f"Model stride: {stride}")
+    debug_print('YOLO', f"Detection classes: {names}")
+    print(f"YOLOv5 model loaded successfully. Detection classes: {names}")
+    
+except Exception as e:
+    debug_print('YOLO', f"YOLOv5 initialization failed: {e}")
+    print("YOLOv5 초기화 실패. 모델 파일을 확인하세요.")
 
 # EasyOCR 초기화
 def initialize_easyocr():
@@ -230,43 +245,57 @@ def initialize_easyocr():
     except Exception as e:
         debug_print('OCR', f"EasyOCR initialization completely failed: {e}")
         print(f"EasyOCR initialization failed: {e}")
+        print("EasyOCR 설치가 필요합니다: pip install easyocr")
         return None, False
 
 easyocr_reader, korean_support = initialize_easyocr()
 
-# 웹캠 초기화 (Picamera2에서 웹캠으로 변경)
-try:
+# 웹캠 초기화 (핵심 수정 부분)
+def initialize_webcam():
+    """웹캠 초기화 함수"""
     debug_print('CAMERA', "Starting webcam initialization...")
-    cap = cv2.VideoCapture(0)
-    debug_print('CAMERA', "VideoCapture object created")
     
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    debug_print('CAMERA', "Webcam resolution set to 640x480")
-    
-    if cap.isOpened():
-        camera_available = True
-        debug_print('CAMERA', "Webcam opened successfully")
-        logger.info("Webcam initialization successful")
-        print("Webcam initialization successful")
-        
-        # 실제 설정값 확인
-        actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-        actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        debug_print('CAMERA', f"Actual webcam resolution: {actual_width}x{actual_height}")
-        print(f"Actual webcam resolution: {actual_width}x{actual_height}")
-    else:
-        camera_available = False
-        debug_print('CAMERA', "Webcam failed to open")
-        logger.error("Webcam initialization failed")
-        print("Webcam initialization failed")
-        
-except Exception as e:
-    debug_print('CAMERA', f"Webcam initialization failed: {e}")
-    logger.error(f"Webcam initialization failed: {e}")
-    print(f"Webcam initialization failed: {e}")
-    camera_available = False
-    cap = None
+    # 여러 카메라 인덱스 시도
+    for camera_index in range(3):  # 0, 1, 2 시도
+        try:
+            debug_print('CAMERA', f"Trying camera index {camera_index}...")
+            cap = cv2.VideoCapture(camera_index)
+            
+            if cap.isOpened():
+                # 해상도 설정 시도
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                
+                # 테스트 프레임 캡처
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None:
+                    debug_print('CAMERA', f"Camera {camera_index} opened successfully")
+                    
+                    # 실제 설정값 확인
+                    actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                    actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    debug_print('CAMERA', f"Actual resolution: {actual_width}x{actual_height}")
+                    print(f"Webcam {camera_index} initialized successfully: {actual_width}x{actual_height}")
+                    
+                    return cap, True, camera_index
+                else:
+                    debug_print('CAMERA', f"Camera {camera_index} opened but cannot capture frames")
+                    cap.release()
+            else:
+                debug_print('CAMERA', f"Camera {camera_index} failed to open")
+                
+        except Exception as e:
+            debug_print('CAMERA', f"Camera {camera_index} initialization error: {e}")
+            
+    debug_print('CAMERA', "All camera indices failed")
+    print("웹캠 초기화 실패. 다음을 확인하세요:")
+    print("1. 웹캠이 USB에 제대로 연결되어 있는지")
+    print("2. lsusb 명령어로 웹캠이 인식되는지")
+    print("3. ls /dev/video* 명령어로 비디오 장치가 있는지")
+    return None, False, -1
+
+# 웹캠 초기화 실행
+cap, camera_available, camera_index = initialize_webcam()
 
 # Global variables
 latest_detections = []
@@ -578,7 +607,7 @@ def read_ultrasonic_sensor():
         try:
             distance = measure_distance()
             
-            # 10cm 이내로 접근 시 YOLOv5 활성화 트리거 (5cm에서 10cm로 변경)
+            # 10cm 이내로 접근 시 YOLOv5 활성화 트리거
             if distance <= DISTANCE_THRESHOLD:
                 debug_print('SENSOR', f"🚗 Vehicle detected at {distance}cm (threshold: {DISTANCE_THRESHOLD}cm)")
                 print(f"Vehicle detected at {distance}cm - Activating license plate detection")
@@ -595,7 +624,7 @@ def detect_objects(frame):
     try:
         debug_print('YOLO', "Starting object detection")
         
-        # 거리 확인 (10cm 이내일 때만 처리) - 5cm에서 10cm로 변경
+        # 거리 확인 (10cm 이내일 때만 처리)
         current_distance = measure_distance()
         if current_distance > DISTANCE_THRESHOLD:
             debug_print('YOLO', f"Distance {current_distance}cm > threshold {DISTANCE_THRESHOLD}cm, skipping detection")
@@ -710,6 +739,8 @@ def generate_frames():
             dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(dummy_frame, "Webcam Not Available", (150, 240), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(dummy_frame, "Check USB connection", (150, 280), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             ret, buffer = cv2.imencode('.jpg', dummy_frame)
             if ret:
                 frame_bytes = buffer.tobytes()
@@ -717,22 +748,25 @@ def generate_frames():
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
             sleep(0.1)
     
-    debug_print('CAMERA', "Starting webcam frame generation")
-    print("Smart Parking System started with webcam")
+    debug_print('CAMERA', f"Starting webcam frame generation (camera index: {camera_index})")
+    print(f"Smart Parking System started with webcam (index: {camera_index})")
     
     frame_count = 0
     while True:
         try:
             frame_count += 1
-            debug_print('CAMERA', f"Capturing frame {frame_count}")
+            if frame_count % 30 == 0:  # 30프레임마다 로그
+                debug_print('CAMERA', f"Capturing frame {frame_count}")
             
             # 웹캠에서 프레임 캡처
             ret, frame = cap.read()
             if not ret:
                 debug_print('CAMERA', "Failed to capture frame from webcam")
+                sleep(0.1)
                 continue
             
-            debug_print('CAMERA', f"Frame captured: {frame.shape}")
+            if frame_count % 30 == 0:
+                debug_print('CAMERA', f"Frame captured: {frame.shape}")
             
             detections = detect_objects(frame)
             
@@ -767,7 +801,7 @@ def generate_frames():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
             
             # 웹캠 표시
-            cv2.putText(frame, "USB Webcam", (10, 450), 
+            cv2.putText(frame, f"USB Webcam {camera_index}", (10, 450), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
             ret, buffer = cv2.imencode('.jpg', frame)
@@ -785,6 +819,8 @@ def generate_frames():
 
 @app.route('/')
 def index():
+    camera_status = f"웹캠 {camera_index}" if camera_available else "웹캠 없음"
+    
     html_template = f'''
     <!DOCTYPE html>
     <html>
@@ -799,16 +835,18 @@ def index():
             .controls {{ margin: 20px 0; }}
             .btn {{ padding: 10px 20px; margin: 5px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }}
             .debug-mode {{ margin: 20px 0; padding: 15px; background-color: #fff3cd; border-radius: 8px; }}
+            .camera-error {{ background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>스마트 주차 관리 시스템 (웹캠 + 디버깅 모드)</h1>
             
-            <div class="debug-mode">
+            <div class="debug-mode {'camera-error' if not camera_available else ''}">
                 <h4>디버깅 모드 활성화</h4>
-                <p>카메라: USB 웹캠 | 거리 임계값: {DISTANCE_THRESHOLD}cm | OCR: EasyOCR</p>
+                <p>카메라: {camera_status} | 거리 임계값: {DISTANCE_THRESHOLD}cm | OCR: EasyOCR</p>
                 <p>모든 처리 과정이 터미널에 상세히 출력됩니다</p>
+                {'<p style="color: red;">⚠️ 웹캠이 감지되지 않았습니다. USB 연결을 확인하세요.</p>' if not camera_available else ''}
                 <button class="btn" onclick="setMode('ENTRY')">입차 모드</button>
                 <button class="btn" onclick="setMode('EXIT')">출차 모드</button>
                 <p>현재 모드: <span id="current-mode">{system_mode}</span></p>
@@ -836,6 +874,12 @@ def index():
                     <p id="mqtt-status">연결 확인 중...</p>
                 </div>
             </div>
+            
+            <div class="controls">
+                <h3>디버깅 도구</h3>
+                <button class="btn" onclick="testCamera()">카메라 테스트</button>
+                <button class="btn" onclick="clearOCRBuffer()">OCR 버퍼 초기화</button>
+            </div>
         </div>
         
         <script>
@@ -845,6 +889,22 @@ def index():
                     .then(data => {{
                         document.getElementById('current-mode').textContent = mode;
                         alert('모드 변경: ' + mode);
+                    }});
+            }}
+            
+            function testCamera() {{
+                fetch('/test_camera')
+                    .then(response => response.json())
+                    .then(data => {{
+                        alert('카메라 테스트: ' + data.message);
+                    }});
+            }}
+            
+            function clearOCRBuffer() {{
+                fetch('/clear_ocr_buffer')
+                    .then(response => response.json())
+                    .then(data => {{
+                        alert('OCR 버퍼 초기화: ' + data.message);
                     }});
             }}
             
@@ -877,7 +937,9 @@ def status():
             'parked_count': len(parking_data),
             'distance': f"{measure_distance():.1f}",
             'mqtt_connected': mqtt_client.is_connected(),
-            'system_mode': system_mode
+            'system_mode': system_mode,
+            'camera_available': camera_available,
+            'camera_index': camera_index if camera_available else -1
         }
 
 @app.route('/set_mode/<mode>')
@@ -891,6 +953,22 @@ def set_mode(mode):
     else:
         return {'status': 'error', 'message': 'Invalid mode'}
 
+@app.route('/test_camera')
+def test_camera():
+    if camera_available:
+        ret, frame = cap.read()
+        if ret:
+            return {'status': 'success', 'message': f'Camera {camera_index} working properly'}
+        else:
+            return {'status': 'error', 'message': f'Camera {camera_index} cannot capture frames'}
+    else:
+        return {'status': 'error', 'message': 'No camera available'}
+
+@app.route('/clear_ocr_buffer')
+def clear_ocr_buffer_endpoint():
+    clear_ocr_buffer()
+    return {'status': 'success', 'message': 'OCR buffer cleared successfully'}
+
 if __name__ == '__main__':
     try:
         debug_print('SYSTEM', "=== SMART PARKING SYSTEM STARTUP ===")
@@ -902,6 +980,9 @@ if __name__ == '__main__':
         print(f"- {DISTANCE_THRESHOLD}cm 이내 접근 시 번호판 인식 활성화")
         print(f"- 현재 모드: {system_mode}")
         print("- 상세 디버깅 모드 활성화")
+        print(f"- 카메라 상태: {'사용 가능' if camera_available else '사용 불가'}")
+        if camera_available:
+            print(f"- 사용 중인 카메라: 인덱스 {camera_index}")
         print("웹 인터페이스: http://localhost:5000")
         debug_print('SYSTEM', "All systems initialized successfully")
         
@@ -917,8 +998,8 @@ if __name__ == '__main__':
         print("시스템 종료...")
     finally:
         debug_print('SYSTEM', "Cleaning up resources...")
-        if camera_available:
-            cap.release()  # 웹캠 리소스 해제
+        if camera_available and cap:
+            cap.release()
             debug_print('CAMERA', "Webcam released")
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
