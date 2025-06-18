@@ -19,9 +19,20 @@ import json
 from datetime import datetime
 import RPi.GPIO as GPIO
 
+# 디버그 플래그 추가
+DEBUG_MODE = True
+HARDWARE_ENABLED = True  # 하드웨어 비활성화 옵션
+
+def debug_print(message):
+    if DEBUG_MODE:
+        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        print(f"[DEBUG {timestamp}] {message}")
+
 # 시스템 인코딩 설정
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
+
+debug_print("System encoding configured")
 
 # 로깅 설정
 logging.basicConfig(
@@ -33,15 +44,23 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+debug_print("Logging system initialized")
 
 # YOLOv5 setup
-sys.path.append('./yolov5')
-from models.common import DetectMultiBackend
-from utils.general import non_max_suppression
-from utils.torch_utils import select_device
+try:
+    debug_print("Loading YOLOv5 modules...")
+    sys.path.append('./yolov5')
+    from models.common import DetectMultiBackend
+    from utils.general import non_max_suppression
+    from utils.torch_utils import select_device
+    debug_print("YOLOv5 modules loaded successfully")
+except Exception as e:
+    debug_print(f"YOLOv5 module loading failed: {e}")
+    raise
 
 # Flask app initialization
 app = Flask(__name__)
+debug_print("Flask app initialized")
 
 # HiveMQ Cloud MQTT setup
 HIVEMQ_URL = '6930cfddf53544a49b88c300d312a4f7.s1.eu.hivemq.cloud'
@@ -49,10 +68,10 @@ HIVEMQ_PORT = 8883
 HIVEMQ_USERNAME = 'hsjpi'
 HIVEMQ_PASSWORD = 'hseojin0939PI'
 
-# MQTT Topics - 입출차 구분
-TOPIC_ENTRY = 'parking/entry'  # 입차 정보
-TOPIC_EXIT = 'parking/exit'    # 출차 정보
-TOPIC_PAYMENT = 'parking/payment'  # 요금 정보
+# MQTT Topics
+TOPIC_ENTRY = 'parking/entry'
+TOPIC_EXIT = 'parking/exit'
+TOPIC_PAYMENT = 'parking/payment'
 TOPIC_OCR = 'parking/ocr'
 
 # GPIO 핀 설정
@@ -60,132 +79,190 @@ TRIG_PIN = 17
 ECHO_PIN = 27
 SERVO_PIN = 18
 
-# GPIO 초기화
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(TRIG_PIN, GPIO.OUT)
-GPIO.setup(ECHO_PIN, GPIO.IN)
-GPIO.setup(SERVO_PIN, GPIO.OUT)
+# GPIO 초기화 (안전한 초기화)
+gpio_initialized = False
+servo_pwm = None
 
-# 서보모터 PWM 설정
-servo_pwm = GPIO.PWM(SERVO_PIN, 50)  # 50Hz
-servo_pwm.start(0)
+def safe_gpio_init():
+    global gpio_initialized, servo_pwm
+    if not HARDWARE_ENABLED:
+        debug_print("Hardware disabled - skipping GPIO initialization")
+        return True
+        
+    try:
+        debug_print("Initializing GPIO...")
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(TRIG_PIN, GPIO.OUT)
+        GPIO.setup(ECHO_PIN, GPIO.IN)
+        GPIO.setup(SERVO_PIN, GPIO.OUT)
+        
+        servo_pwm = GPIO.PWM(SERVO_PIN, 50)
+        servo_pwm.start(0)
+        
+        gpio_initialized = True
+        debug_print("GPIO initialized successfully")
+        return True
+    except Exception as e:
+        debug_print(f"GPIO initialization failed: {e}")
+        gpio_initialized = False
+        return False
+
+safe_gpio_init()
 
 # MQTT Client 생성
 mqtt_client = mqtt.Client(CallbackAPIVersion.VERSION1)
+mqtt_connected = False
 
 def safe_mqtt_publish(topic, message):
+    global mqtt_connected
     try:
         if isinstance(message, str):
             mqtt_client.publish(topic, message.encode('utf-8'))
         else:
             mqtt_client.publish(topic, message)
-        # 핵심 정보만 로깅
+        
         if topic in [TOPIC_ENTRY, TOPIC_EXIT, TOPIC_PAYMENT]:
-            logger.info(f"MQTT: {topic} -> {message}")
-            print(f"MQTT: {topic} -> {message}")
+            debug_print(f"MQTT published: {topic} -> {message}")
     except Exception as e:
-        logger.error(f"MQTT publish error: {e}")
+        debug_print(f"MQTT publish error: {e}")
 
 def on_connect(client, userdata, flags, rc):
+    global mqtt_connected
     if rc == 0:
-        print("HiveMQ Cloud MQTT connected successfully!")
-        # 출차 정보 수신을 위한 구독 (입차 담당이 출차 담당으로부터 받을 경우)
+        mqtt_connected = True
+        debug_print("MQTT connected successfully")
         client.subscribe(TOPIC_EXIT)
         client.subscribe(TOPIC_PAYMENT)
     else:
-        print(f"HiveMQ Cloud MQTT connection failed: {rc}")
+        mqtt_connected = False
+        debug_print(f"MQTT connection failed: {rc}")
 
 def on_message(client, userdata, msg):
     try:
         topic = msg.topic
         message = msg.payload.decode('utf-8')
         if topic in [TOPIC_EXIT, TOPIC_PAYMENT]:
-            print(f"Received: {topic} -> {message}")
+            debug_print(f"MQTT received: {topic} -> {message}")
     except Exception as e:
-        logger.error(f"MQTT message handling error: {e}")
+        debug_print(f"MQTT message handling error: {e}")
 
 # MQTT 클라이언트 설정
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 
-mqtt_client.username_pw_set(HIVEMQ_USERNAME, HIVEMQ_PASSWORD)
-mqtt_client.tls_set(
-    ca_certs=None, 
-    certfile=None, 
-    keyfile=None,
-    cert_reqs=ssl.CERT_REQUIRED,
-    tls_version=ssl.PROTOCOL_TLS,
-    ciphers=None
-)
-
 try:
+    debug_print("Configuring MQTT client...")
+    mqtt_client.username_pw_set(HIVEMQ_USERNAME, HIVEMQ_PASSWORD)
+    mqtt_client.tls_set(
+        ca_certs=None, 
+        certfile=None, 
+        keyfile=None,
+        cert_reqs=ssl.CERT_REQUIRED,
+        tls_version=ssl.PROTOCOL_TLS,
+        ciphers=None
+    )
+    
+    debug_print("Connecting to MQTT broker...")
     mqtt_client.connect(HIVEMQ_URL, HIVEMQ_PORT, 60)
     mqtt_client.loop_start()
-    print("HiveMQ Cloud MQTT client started")
+    debug_print("MQTT client started")
 except Exception as e:
-    print(f"HiveMQ Cloud MQTT connection failed: {e}")
+    debug_print(f"MQTT setup failed: {e}")
 
 # YOLOv5 model initialization
-print("YOLOv5 model loading...")
-device = select_device('0' if torch.cuda.is_available() else 'cpu')
-
 try:
-    model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
-    print("Custom parking model loaded successfully")
-except:
+    debug_print("Loading YOLOv5 model...")
+    device = select_device('0' if torch.cuda.is_available() else 'cpu')
+    debug_print(f"Using device: {device}")
+    
     try:
-        model = DetectMultiBackend('yolov5s.pt', device=device)
-        print("Using default YOLOv5s model")
+        model = DetectMultiBackend('runs/train/parking_custom320/weights/best.pt', device=device)
+        debug_print("Custom parking model loaded")
     except:
-        print("Failed to load any YOLOv5 model")
-        raise
-
-stride, names = model.stride, model.names
-print(f"YOLOv5 model loaded successfully. Detection classes: {names}")
+        try:
+            model = DetectMultiBackend('yolov5s.pt', device=device)
+            debug_print("Default YOLOv5s model loaded")
+        except Exception as e:
+            debug_print(f"Model loading failed: {e}")
+            raise
+    
+    stride, names = model.stride, model.names
+    debug_print(f"Model classes: {names}")
+    
+except Exception as e:
+    debug_print(f"YOLOv5 initialization failed: {e}")
+    raise
 
 # EasyOCR 초기화
 def initialize_easyocr():
     try:
-        print("EasyOCR initialization started...")
+        debug_print("Initializing EasyOCR...")
         try:
             reader = easyocr.Reader(['ko', 'en'])
-            print("EasyOCR initialized with Korean + English support")
+            debug_print("EasyOCR initialized with Korean + English")
             return reader, True
         except Exception as e:
-            print(f"Korean model failed, trying English only: {e}")
+            debug_print(f"Korean model failed: {e}")
             reader = easyocr.Reader(['en'])
-            print("EasyOCR initialized with English only")
+            debug_print("EasyOCR initialized with English only")
             return reader, False
     except Exception as e:
-        print(f"EasyOCR initialization failed: {e}")
+        debug_print(f"EasyOCR initialization failed: {e}")
         return None, False
 
 easyocr_reader, korean_support = initialize_easyocr()
 
-# 웹캠 초기화
-try:
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    
-    if cap.isOpened():
-        camera_available = True
-        print("Webcam initialization successful")
-    else:
-        camera_available = False
-        print("Webcam initialization failed")
-except Exception as e:
-    print(f"Webcam initialization failed: {e}")
-    camera_available = False
-    cap = None
+# 웹캠 초기화 (개선된 버전)
+def initialize_camera():
+    try:
+        debug_print("Initializing camera...")
+        cap = cv2.VideoCapture(0)
+        
+        if not cap.isOpened():
+            debug_print("Camera not opened, trying different indices...")
+            for i in range(1, 4):
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    debug_print(f"Camera found at index {i}")
+                    break
+        
+        if cap.isOpened():
+            debug_print("Setting camera properties...")
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 15)  # FPS 제한
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 최소화
+            
+            # 테스트 프레임 읽기
+            ret, test_frame = cap.read()
+            if ret:
+                debug_print(f"Camera test successful - Frame shape: {test_frame.shape}")
+                return cap, True
+            else:
+                debug_print("Camera test failed - cannot read frame")
+                cap.release()
+                return None, False
+        else:
+            debug_print("Camera initialization failed")
+            return None, False
+            
+    except Exception as e:
+        debug_print(f"Camera initialization error: {e}")
+        return None, False
+
+cap, camera_available = initialize_camera()
 
 # Global variables
 latest_detections = []
 detection_lock = threading.Lock()
 latest_ocr_text = ""
 ocr_debug_info = ""
-parking_data = {}  # 입차 데이터 저장
-system_mode = "ENTRY"  # ENTRY 또는 EXIT
+parking_data = {}
+system_mode = "ENTRY"
+
+# 거리 센서 캐시 (성능 개선)
+distance_cache = {'value': 999, 'timestamp': 0}
+DISTANCE_CACHE_DURATION = 0.5  # 0.5초 캐시
 
 # 연속 프레임 OCR 검증 시스템
 ocr_buffer = []
@@ -235,49 +312,75 @@ def clear_ocr_buffer():
     global ocr_buffer
     ocr_buffer.clear()
 
-# 실제 하드웨어 제어 함수들
+# 개선된 거리 측정 함수 (캐시 사용)
 def measure_distance():
-    """초음파센서로 실제 거리 측정"""
+    global distance_cache
+    
+    if not HARDWARE_ENABLED or not gpio_initialized:
+        return 999  # 하드웨어 비활성화 시 큰 값 반환
+    
+    current_time = time()
+    
+    # 캐시된 값 사용 (성능 개선)
+    if current_time - distance_cache['timestamp'] < DISTANCE_CACHE_DURATION:
+        return distance_cache['value']
+    
     try:
+        debug_print("Measuring distance...")
         GPIO.output(TRIG_PIN, False)
-        sleep(0.05)
+        sleep(0.01)  # 지연 시간 단축
 
         GPIO.output(TRIG_PIN, True)
         sleep(0.00001)
         GPIO.output(TRIG_PIN, False)
 
+        timeout = time() + 0.1  # 100ms 타임아웃
         pulse_start = time()
         pulse_end = time()
 
-        while GPIO.input(ECHO_PIN) == 0:
+        while GPIO.input(ECHO_PIN) == 0 and time() < timeout:
             pulse_start = time()
 
-        while GPIO.input(ECHO_PIN) == 1:
+        while GPIO.input(ECHO_PIN) == 1 and time() < timeout:
             pulse_end = time()
 
-        pulse_duration = pulse_end - pulse_start
-        distance = pulse_duration * 17150  # cm
-        distance = round(distance, 2)
+        if time() >= timeout:
+            debug_print("Distance measurement timeout")
+            distance = 999
+        else:
+            pulse_duration = pulse_end - pulse_start
+            distance = pulse_duration * 17150
+            distance = round(distance, 2)
+        
+        # 캐시 업데이트
+        distance_cache = {'value': distance, 'timestamp': current_time}
+        debug_print(f"Distance measured: {distance}cm")
         return distance
+        
     except Exception as e:
-        print(f"Distance measurement error: {e}")
-        return 999  # 오류 시 큰 값 반환
+        debug_print(f"Distance measurement error: {e}")
+        return 999
 
 def set_servo_angle(angle):
-    """서보모터 실제 각도 제어"""
+    if not HARDWARE_ENABLED or not gpio_initialized or servo_pwm is None:
+        debug_print(f"Servo simulation: {angle} degrees")
+        return
+        
     try:
+        debug_print(f"Setting servo angle: {angle}")
         duty = angle / 18 + 2
         GPIO.output(SERVO_PIN, True)
         servo_pwm.ChangeDutyCycle(duty)
         sleep(0.5)
         GPIO.output(SERVO_PIN, False)
         servo_pwm.ChangeDutyCycle(0)
+        debug_print("Servo angle set successfully")
     except Exception as e:
-        print(f"Servo control error: {e}")
+        debug_print(f"Servo control error: {e}")
 
 # 입출차 관리 함수들
 def handle_entry(plate_number):
-    """입차 처리"""
+    debug_print(f"Processing entry for: {plate_number}")
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     parking_data[plate_number] = {'entry_time': now}
     
@@ -288,14 +391,14 @@ def handle_entry(plate_number):
     }
     
     safe_mqtt_publish(TOPIC_ENTRY, json.dumps(entry_data))
-    print(f"ENTRY: {plate_number} at {now}")
+    debug_print(f"Entry processed: {plate_number}")
     
     # 게이트 열기
     set_servo_angle(90)
     threading.Timer(5.0, lambda: set_servo_angle(0)).start()
 
 def handle_exit(plate_number):
-    """출차 처리"""
+    debug_print(f"Processing exit for: {plate_number}")
     now = datetime.now()
     
     if plate_number in parking_data:
@@ -303,10 +406,9 @@ def handle_exit(plate_number):
         entry_time = datetime.strptime(entry_time_str, '%Y-%m-%d %H:%M:%S')
         duration_seconds = (now - entry_time).total_seconds()
         
-        # 요금 계산 (기본 1000원 + 10분당 500원)
         base_fee = 1000
         duration_minutes = duration_seconds / 60
-        additional_fee = max(0, (duration_minutes - 30)) * (500 / 10)  # 30분 후부터 10분당 500원
+        additional_fee = max(0, (duration_minutes - 30)) * (500 / 10)
         total_fee = int(base_fee + additional_fee)
         
         exit_data = {
@@ -320,17 +422,16 @@ def handle_exit(plate_number):
         
         safe_mqtt_publish(TOPIC_EXIT, json.dumps(exit_data))
         safe_mqtt_publish(TOPIC_PAYMENT, f"Payment: {plate_number} - {total_fee} won")
-        print(f"EXIT: {plate_number} - Duration: {duration_minutes:.1f}min - Fee: {total_fee}won")
+        debug_print(f"Exit processed: {plate_number} - Fee: {total_fee}won")
         
         del parking_data[plate_number]
         
-        # 게이트 열기
         set_servo_angle(90)
         threading.Timer(5.0, lambda: set_servo_angle(0)).start()
         
         return total_fee
     else:
-        print(f"EXIT ATTEMPT: Unknown plate {plate_number}")
+        debug_print(f"Unknown plate exit attempt: {plate_number}")
         return None
 
 def enhanced_preprocessing_for_easyocr(image):
@@ -359,15 +460,18 @@ def enhanced_preprocessing_for_easyocr(image):
         
         return denoised
     except Exception as e:
+        debug_print(f"Preprocessing error: {e}")
         return image
 
 def extract_text_with_easyocr(license_plate_image):
     global ocr_debug_info
     
     if easyocr_reader is None:
+        debug_print("EasyOCR reader not available")
         return None
     
     try:
+        debug_print("Starting OCR processing...")
         processed = enhanced_preprocessing_for_easyocr(license_plate_image)
         results = easyocr_reader.readtext(processed)
         
@@ -411,45 +515,51 @@ def extract_text_with_easyocr(license_plate_image):
             
             if is_approved:
                 ocr_debug_info = f"Validated: {validated_result}"
+                debug_print(f"OCR result validated: {validated_result}")
                 return validated_result
             else:
                 ocr_debug_info = "Validation pending..."
+                debug_print("OCR validation pending...")
                 return None
         
         return None
         
     except Exception as e:
-        print(f"EasyOCR error: {e}")
+        debug_print(f"OCR processing error: {e}")
         return None
 
 def read_ultrasonic_sensor():
-    """실제 초음파센서 모니터링"""
-    print("Ultrasonic sensor monitoring started")
+    debug_print("Starting ultrasonic sensor monitoring thread")
     
     while True:
         try:
             distance = measure_distance()
             
-            # 5cm 이내로 접근 시 YOLOv5 활성화 트리거
-            if distance <= 5.0:
-                print(f"Vehicle detected at {distance}cm - Activating license plate detection")
-                # 이 시점에서 YOLOv5가 이미 실행 중이므로 별도 처리 불필요
+            if distance <= 10.0:  # 10cm로 변경
+                debug_print(f"Vehicle detected at {distance}cm")
             
-            sleep(0.5)  # 0.5초마다 거리 측정
+            sleep(1.0)  # 1초로 간격 증가 (성능 개선)
             
         except Exception as e:
-            print(f"Ultrasonic sensor error: {e}")
-            sleep(1)
+            debug_print(f"Ultrasonic sensor thread error: {e}")
+            sleep(2)
 
+# 개선된 객체 감지 함수
 def detect_objects(frame):
     global latest_ocr_text
     
     try:
-        # 거리 확인 (5cm 이내일 때만 처리)
-        current_distance = measure_distance()
-        if current_distance > 5.0:
-            return []  # 5cm 이내가 아니면 처리하지 않음
+        debug_print("Starting object detection...")
         
+        # 거리 확인 (10cm 이내일 때만 처리) - 캐시된 값 사용
+        current_distance = measure_distance()
+        if current_distance > 10.0:
+            debug_print(f"Distance {current_distance}cm > 10cm - skipping detection")
+            return []
+        
+        debug_print(f"Processing frame - distance: {current_distance}cm")
+        
+        # 이미지 전처리
         img = cv2.resize(frame, (320, 320))
         img_input = img[:, :, ::-1].transpose(2, 0, 1)
         img_input = np.ascontiguousarray(img_input)
@@ -459,6 +569,7 @@ def detect_objects(frame):
         if img_tensor.ndimension() == 3:
             img_tensor = img_tensor.unsqueeze(0)
 
+        debug_print("Running YOLO inference...")
         pred = model(img_tensor)
         pred = non_max_suppression(pred, conf_thres=0.7, iou_thres=0.45)[0]
         
@@ -466,15 +577,18 @@ def detect_objects(frame):
         plate_detected_in_frame = False
         
         if pred is not None:
+            debug_print(f"YOLO detected {len(pred)} objects")
             for *xyxy, conf, cls in pred:
                 class_name = names[int(cls)]
                 
                 if class_name.lower() == 'plat':
                     plate_detected_in_frame = True
+                    debug_print(f"License plate detected with confidence: {conf:.2f}")
                     
                     label = f'{class_name} {conf:.2f}'
                     xyxy = list(map(int, xyxy))
                     
+                    # 좌표 변환
                     xyxy[0] = int(xyxy[0] * frame.shape[1] / 320)
                     xyxy[1] = int(xyxy[1] * frame.shape[0] / 320)
                     xyxy[2] = int(xyxy[2] * frame.shape[1] / 320)
@@ -489,6 +603,7 @@ def detect_objects(frame):
                     
                     if x2 > x1 and y2 > y1 and (x2-x1) >= 50 and (y2-y1) >= 20:
                         try:
+                            debug_print("Extracting license plate region for OCR...")
                             license_plate_crop = frame[y1:y2, x1:x2]
                             ocr_text = extract_text_with_easyocr(license_plate_crop)
                             
@@ -496,8 +611,7 @@ def detect_objects(frame):
                                 latest_ocr_text = ocr_text
                                 label = f'{class_name} {conf:.2f} [{ocr_text}]'
                                 
-                                # 핵심 정보만 출력
-                                print(f"License Plate Detected: {ocr_text}")
+                                debug_print(f"License plate recognized: {ocr_text}")
                                 
                                 # 입출차 처리
                                 if system_mode == "ENTRY":
@@ -508,7 +622,7 @@ def detect_objects(frame):
                                 clear_ocr_buffer()
                                 
                         except Exception as crop_error:
-                            print(f"Cropping error: {crop_error}")
+                            debug_print(f"License plate cropping error: {crop_error}")
                     
                     detections.append({
                         'bbox': xyxy,
@@ -516,23 +630,30 @@ def detect_objects(frame):
                         'class': class_name,
                         'confidence': float(conf)
                     })
+        else:
+            debug_print("No objects detected by YOLO")
         
         if not plate_detected_in_frame and len(ocr_buffer) > 0:
             clear_ocr_buffer()
         
+        debug_print(f"Object detection completed - {len(detections)} detections")
         return detections
         
     except Exception as e:
-        print(f"Object detection error: {e}")
+        debug_print(f"Object detection error: {e}")
         return []
 
+# 개선된 프레임 생성 함수
 def generate_frames():
     global latest_detections
     
+    debug_print("Starting frame generation...")
+    
     if not camera_available:
+        debug_print("Camera not available - generating dummy frames")
         while True:
             dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(dummy_frame, "Webcam Not Available", (150, 240), 
+            cv2.putText(dummy_frame, "Camera Not Available", (150, 240), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             ret, buffer = cv2.imencode('.jpg', dummy_frame)
             if ret:
@@ -541,20 +662,31 @@ def generate_frames():
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
             sleep(0.1)
     
-    print("Smart Parking System started")
+    frame_count = 0
     
     while True:
         try:
+            frame_count += 1
+            debug_print(f"Processing frame {frame_count}")
+            
             ret, frame = cap.read()
             if not ret:
+                debug_print("Failed to read frame from camera")
                 continue
             
-            detections = detect_objects(frame)
+            debug_print(f"Frame read successfully - shape: {frame.shape}")
             
-            with detection_lock:
-                latest_detections = detections
+            # 매 3번째 프레임만 객체 감지 (성능 개선)
+            if frame_count % 3 == 0:
+                detections = detect_objects(frame)
+                
+                with detection_lock:
+                    latest_detections = detections
+            else:
+                with detection_lock:
+                    detections = latest_detections
             
-            # Draw bounding boxes
+            # 바운딩 박스 그리기
             for detection in detections:
                 bbox = detection['bbox']
                 label = detection['label']
@@ -563,10 +695,10 @@ def generate_frames():
                 cv2.putText(frame, label, (bbox[0], bbox[1] - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
-            # 핵심 정보만 표시
+            # 상태 정보 표시
             cv2.putText(frame, f"Mode: {system_mode}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, f"Distance: {measure_distance():.1f}cm", (10, 60), 
+            cv2.putText(frame, f"Distance: {distance_cache['value']:.1f}cm", (10, 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             if latest_ocr_text:
@@ -576,8 +708,12 @@ def generate_frames():
             cv2.putText(frame, f"Parked: {len(parking_data)}", (10, 120), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
-            ret, buffer = cv2.imencode('.jpg', frame)
+            cv2.putText(frame, f"Frame: {frame_count}", (10, 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ret:
+                debug_print("Failed to encode frame")
                 continue
                 
             frame_bytes = buffer.tobytes()
@@ -585,11 +721,13 @@ def generate_frames():
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                    
         except Exception as e:
-            print(f"Frame generation error: {e}")
+            debug_print(f"Frame generation error: {e}")
             sleep(0.1)
 
+# Flask 라우트들
 @app.route('/')
 def index():
+    debug_print("Index page requested")
     html_template = f'''
     <!DOCTYPE html>
     <html>
@@ -604,11 +742,20 @@ def index():
             .controls {{ margin: 20px 0; }}
             .btn {{ padding: 10px 20px; margin: 5px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }}
             .mode-selector {{ margin: 20px 0; padding: 15px; background-color: #e3f2fd; border-radius: 8px; }}
+            .debug-info {{ margin: 20px 0; padding: 10px; background-color: #fff3cd; border-radius: 5px; font-family: monospace; font-size: 12px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>스마트 주차 관리 시스템 (입출차 관리)</h1>
+            <h1>스마트 주차 관리 시스템 (디버그 모드)</h1>
+            
+            <div class="debug-info">
+                <strong>시스템 상태:</strong><br>
+                카메라: {'활성화' if camera_available else '비활성화'}<br>
+                GPIO: {'활성화' if gpio_initialized else '비활성화'}<br>
+                MQTT: {'연결됨' if mqtt_connected else '연결 안됨'}<br>
+                하드웨어: {'활성화' if HARDWARE_ENABLED else '비활성화'}
+            </div>
             
             <div class="mode-selector">
                 <h4>시스템 모드</h4>
@@ -669,6 +816,7 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
+    debug_print("Video feed requested")
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
@@ -678,9 +826,11 @@ def status():
         return {
             'latest_plate': latest_ocr_text,
             'parked_count': len(parking_data),
-            'distance': f"{measure_distance():.1f}",
-            'mqtt_connected': mqtt_client.is_connected(),
-            'system_mode': system_mode
+            'distance': f"{distance_cache['value']:.1f}",
+            'mqtt_connected': mqtt_connected,
+            'system_mode': system_mode,
+            'camera_available': camera_available,
+            'gpio_initialized': gpio_initialized
         }
 
 @app.route('/set_mode/<mode>')
@@ -688,33 +838,46 @@ def set_mode(mode):
     global system_mode
     if mode in ['ENTRY', 'EXIT']:
         system_mode = mode
-        print(f"System mode changed to: {mode}")
+        debug_print(f"System mode changed to: {mode}")
         return {'status': 'success', 'mode': mode}
     else:
         return {'status': 'error', 'message': 'Invalid mode'}
 
 if __name__ == '__main__':
     try:
+        debug_print("=== Smart Parking System Starting ===")
+        debug_print(f"Camera available: {camera_available}")
+        debug_print(f"GPIO initialized: {gpio_initialized}")
+        debug_print(f"MQTT connected: {mqtt_connected}")
+        debug_print(f"Hardware enabled: {HARDWARE_ENABLED}")
+        debug_print(f"Current mode: {system_mode}")
+        
         print("스마트 주차 시스템 시작!")
-        print("- 실제 GPIO 하드웨어 연동")
-        print("- 입출차 관리 및 요금 계산")
-        print("- HiveMQ Cloud MQTT 통신")
-        print("- 5cm 이내 접근 시 번호판 인식 활성화")
-        print(f"- 현재 모드: {system_mode}")
+        print("- 디버그 모드 활성화")
+        print("- 10cm 이내 접근 시 번호판 인식 활성화")
+        print("- 성능 최적화 적용")
         print("웹 인터페이스: http://localhost:5000")
         
         # 초음파센서 모니터링 스레드 시작
-        sensor_thread = threading.Thread(target=read_ultrasonic_sensor, daemon=True)
-        sensor_thread.start()
+        if HARDWARE_ENABLED:
+            sensor_thread = threading.Thread(target=read_ultrasonic_sensor, daemon=True)
+            sensor_thread.start()
+            debug_print("Ultrasonic sensor thread started")
         
+        debug_print("Starting Flask application...")
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
         
     except KeyboardInterrupt:
-        print("시스템 종료...")
+        debug_print("System shutdown requested")
+    except Exception as e:
+        debug_print(f"System error: {e}")
     finally:
-        if camera_available:
+        debug_print("Cleaning up resources...")
+        if camera_available and cap:
             cap.release()
-        mqtt_client.loop_stop()
-        mqtt_client.disconnect()
-        GPIO.cleanup()
-        print("정리 완료")
+        if mqtt_connected:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+        if gpio_initialized:
+            GPIO.cleanup()
+        debug_print("Cleanup completed")
